@@ -504,6 +504,28 @@ surface's own: what a ray meets within three cells of the surface it goes on to 
 has liquid a cell and a half below it, is the layer every surface of this solver has, not
 spray. (Counted as spray it was a grain all over solved water seen at a low angle.)
 
+What no cell is small enough to hold is drawn on top, for the eye only ("Ripples, sun
+glitter, wet shores" in the panel, `?nodetail` in the address):
+
+* *Ripples.* Three sets of smooth noise, 10, 4.5 and 2 cells long, each of them two trains
+  that cross and drift, tilt the normal of water that lies flat by 0.02 to 0.03 each. Solved
+  water and the water beyond it get the same ones. A set that a pixel is too large to show
+  is left out.
+* *The sun on them.* Ripples smaller than that are a lattice of facets a few pixels across,
+  each with a slope of its own (variance 0.012: a light breeze) that turns slowly. A facet
+  lights up while its slope is the one that sends the sun to the eye, so the points of
+  light gather round the sun's reflection and thin out away from it. Their mean is the
+  brightness of a rough surface of that variance (sampled: within 0.2 %). In the views the
+  scenes open with the sun stands behind the camera: the glitter is there when one turns
+  to look towards it.
+* *Wet ground.* The ground is a third darker under water, and for two cells of height
+  above the water beside it (looked for downhill, up to 64 cells away), and where solved
+  water lies on it.
+
+The solver knows nothing of any of it. A frame costs 0.02 to 0.04 ms more to draw at 788 ×
+600 (the ship 1.11 → 1.14 ms), and 0.15 ms more in the surf scene (2.04 → 2.19 ms), where
+most of the picture is water over a beach.
+
 **Measured** (Chrome 154, RTX 3090)
 
 Every brick of a box stored, against the dense solver on the same box (`?mode=perf`, the

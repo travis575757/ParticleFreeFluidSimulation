@@ -566,6 +566,63 @@ vec3 sky(vec3 d) {
   float s = max(dot(d, uLight), 0.0);
   return c + vec3(1.0, 0.93, 0.80) * (pow(s, 900.0) * 6.0 + pow(s, 24.0) * 0.18);
 }
+// ---- what no cell is small enough to hold: ripples, the sun on them, wet ground along the water
+uniform float uTime;          // s
+uniform float uDetail;        // 1: draw these, 0: the water and the ground as the solver has them
+float hashI(ivec2 p) {
+  uint h = uint(p.x) * 0x27d4eb2dU ^ uint(p.y) * 0x165667b1U;
+  h ^= h >> 15; h *= 0x2c1b3c6dU; h ^= h >> 12; h *= 0x297a2d39U; h ^= h >> 15;
+  return float(h >> 8) * (1.0 / 16777216.0);
+}
+// smooth noise between the points of a lattice: x = value (0 to 1), yz = its slope
+vec3 noiseD(vec2 x) {
+  vec2 fl = floor(x), f = x - fl;
+  ivec2 i = ivec2(fl);
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  float a = hashI(i), b = hashI(i + ivec2(1, 0)), c = hashI(i + ivec2(0, 1)), d = hashI(i + ivec2(1, 1));
+  return vec3(a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y, du * (vec2(b - a, c - a) + (a - b - c + d) * u.yx));
+}
+// Slope (d/dx, d/dz) of the ripples at xz: three sets, 10, 4.5 and 2 cells long, each two trains
+// that cross (one alone slides over the water like a pattern on a cloth). foot: the size of a
+// pixel on the water there, in cells: a set that a pixel cannot show is left out.
+vec2 ripples(vec2 xz, float foot) {
+  vec2 sl = vec2(0.0);
+  for (int k = 0; k < 3; k++) {
+    float len = k == 0 ? 10.0 : k == 1 ? 4.5 : 2.0;
+    float w = 1.0 - smoothstep(0.25 * len, 0.7 * len, foot);
+    if (w <= 0.0) continue;
+    float a = k == 0 ? 0.6 : k == 1 ? 1.9 : 3.7;
+    mat2 R = mat2(cos(a), sin(a), -sin(a), cos(a));
+    vec2 q = R * xz * (2.0 / len);
+    float speed = (k == 0 ? 0.55 : k == 1 ? 0.8 : 1.1) * uTime;
+    vec2 g = noiseD(q + vec2(speed, 0.3 * speed)).yz + noiseD(q * 1.13 + vec2(17.0 - 0.7 * speed, 5.0 + 0.9 * speed)).yz * 1.13;
+    sl += (k == 0 ? 0.030 : k == 1 ? 0.026 : 0.020) * w * (g * R);
+  }
+  return sl;
+}
+// The sun on ripples too small to draw. A lattice of facets, one to a square of grain cells,
+// each with a slope of its own (spread like those of a sea in a light breeze: variance 0.012)
+// that turns slowly: a facet sends the sun this way while its slope is the one that takes
+// (need). Two lattices, the grain a few pixels, so that a point of light is never smaller than a
+// pixel. Mean over many facets: exp(-need.need / 0.014).
+float facets(vec2 xz, float grain, vec2 need) {
+  vec2 q = xz / grain, fl = floor(q);
+  ivec2 i = ivec2(fl);
+  float h1 = hashI(i), h2 = hashI(i + ivec2(91, 37));
+  float spot = 1.0 - smoothstep(0.10, 0.30, length(q - fl - 0.3 - 0.4 * vec2(h1, h2)));
+  if (spot <= 0.0) return 0.0;
+  float h3 = hashI(i + ivec2(-53, 113)), h4 = hashI(i + ivec2(7, -201));
+  float a = 6.2832 * (h4 + uTime * (0.1 + 0.25 * h1));
+  vec2 d = sqrt(-0.012 * log(max(h3, 1.0e-4))) * vec2(cos(a), sin(a)) - need;
+  // (mean of the spot: 0.1319, of the flash: 0.002 / 0.014)
+  return spot * exp(-dot(d, d) / 0.002) / 0.01885;
+}
+float sparkle(vec2 xz, float foot, vec2 need) {
+  float lod = log2(max(foot * 4.0 / 0.6, 1.0)), l0 = floor(lod);
+  float g = 0.6 * exp2(l0);
+  return mix(facets(xz, g, need), facets(xz, 2.0 * g, need), lod - l0);
+}
 // mapped: p is on water that is not solved
 vec3 liquidNormal(vec3 p, bool mapped) {
   ivec3 b = ivec3(floor(p / float(BS)));
@@ -639,6 +696,45 @@ float groundShadow(vec3 p) {
   }
   return clamp(res, 0.0, 1.0);
 }
+// How wet the ground at p is (0 to 1): under water, and for a cell or two of height above it
+// along the shore. slope: that of the ground at p (the water is looked for downhill of p).
+float wetGround(vec3 p, vec2 slope) {
+  float wet = 0.0;
+  if (uHfMap.w > 0.5) {
+    float g = max(length(slope), 1.0e-4);
+    for (int k = 0; k < 4; k++) {
+      // (here, then where the ground is 0.7, 1.4 and 2.1 cells lower, as far as 64 cells away)
+      float d = min(0.7 * float(k) / g, 64.0);
+      vec2 sf = hfSurf(p.xz - slope * (d / g), false);
+      if (sf.y > 0.0) wet = max(wet, (1.0 - smoothstep(0.3, 2.0, p.y - sf.x)) * (1.0 - smoothstep(40.0, 64.0, d)));
+      if (wet >= 1.0 || d >= 64.0) break;
+    }
+  } else {
+    vec3 an = vec3(uAnchor);
+    for (int i = 0; i < ${MAX_WATER}; i++) {
+      if (i >= uWaterN) break;
+      vec4 b = uWaterBox[i];
+      vec3 r = p - an;
+      if (r.x < b.x || r.x > b.z || r.z < b.y || r.z > b.w) continue;
+      wet = max(wet, 1.0 - smoothstep(0.3, 2.0, r.y - uWaterLvl[i].x - swellAt(p.xz).r));
+    }
+  }
+  if (wet >= 1.0) return wet;
+  // solved water: liquid (or spray that lands) on the ground here, or liquid beside it
+  ivec3 b = ivec3(floor(p / float(BS)));
+  int sb = brickSlot(b);
+  if (sb < 0 || g_state > 1.5) return wet;
+  vec3 org = vec3(b * BS);
+  float d = densNear(sb, org, p + vec3(0.0, 0.7, 0.0));
+  for (int k = 0; k < 4; k++) {
+    vec2 o = k == 0 ? vec2(2.0, 0.0) : k == 1 ? vec2(-2.0, 0.0) : k == 2 ? vec2(0.0, 2.0) : vec2(0.0, -2.0);
+    vec3 q = p + vec3(o.x, 0.0, o.y);
+    // (beside, at the height of the ground there or just below this point, whichever is higher)
+    q.y = max(terrainAt(q).x + 0.6, p.y - 1.5);
+    if (q.y < p.y + 0.5) d = max(d, 0.8 * densNear(sb, org, q));
+  }
+  return max(wet, smoothstep(0.05, 0.5, d));
+}
 // colour of the ground or of an obstacle at p
 vec3 shadeOpaque(vec3 p, float idx, float t) {
   vec3 n, base;
@@ -656,6 +752,8 @@ vec3 shadeOpaque(vec3 p, float idx, float t) {
     base *= 1.0 - 0.16 * (1.0 - smoothstep(0.0, 0.25 + 0.0015 * t, c)) * smoothstep(0.03, 0.2, steep);
     vec2 g = abs(fract(p.xz / 8.0 + 0.5) - 0.5) * 8.0;
     base *= 1.0 - 0.10 * (1.0 - smoothstep(0.0, 0.12 + 0.0015 * t, min(g.x, g.y))) * (1.0 - smoothstep(0.1, 0.4, steep));
+    // wet ground is darker
+    if (uDetail > 0.5) base *= 1.0 - 0.36 * wetGround(p, h.yz);
   } else {
     const float e = 0.05;
     n = normalize(vec3(sdS(p + vec3(e, 0.0, 0.0)).x - sdS(p - vec3(e, 0.0, 0.0)).x,
@@ -692,10 +790,26 @@ void main() {
   if (tw >= 0.0) {
     vec3 ph = ro + rd * tw;
     vec3 n = liquidNormal(ph, g_mapped);
+    // the size of a pixel on the water, along the line of sight
+    float foot = tw * uFov * 2.0 / uRes.y / max(abs(dot(rd, n)), 0.08);
+    if (uDetail > 0.5 && n.y > 0.3) {
+      // ripples: on water that lies flat (a sheet that falls has none)
+      vec2 rp = ripples(ph.xz, foot) * smoothstep(0.3, 0.7, n.y);
+      n = normalize(vec3(n.x - rp.x * n.y, n.y, n.z - rp.y * n.y));
+    }
     if (dot(n, rd) > 0.0) n = -n;
     float c = clamp(dot(-rd, n), 0.0, 1.0);
     float F = 0.02 + 0.98 * pow(1.0 - c, 5.0);
     col = F * sky(reflect(rd, n));
+    if (uDetail > 0.5 && n.y > 0.3) {
+      // the sun on the ripples that are too small to draw: see sparkle()
+      vec3 hv = normalize(uLight - rd);
+      vec2 need = hv.xz / max(hv.y, 0.05) - n.xz / n.y;
+      if (dot(need, need) < 0.09) {
+        float fa = tw * uFov * 2.0 / uRes.y / sqrt(max(abs(dot(rd, n)), 0.08));
+        col += vec3(1.0, 0.93, 0.80) * (F * 8.0 * sparkle(ph.xz, fa, need) * groundShadow(ph));
+      }
+    }
     // (the density met right up to the surface is the surface, unless there is more of it than
     // the three cells a surface is thick at the most: see crossing())
     float skin = 3.0 / max(c, 0.15) + uStep, met = tw - g_runFrom;
@@ -805,6 +919,8 @@ void main() {
       uStep: o.step ?? 0.6,
       uLight: [l[0] / ll, l[1] / ll, l[2] / ll],
       uMist: o.mist === false ? 0 : 0.22,
+      uTime: world.time,
+      uDetail: o.detail === false ? 0 : 1,
       uOverlay: o.overlay ? 1 : 0,
       uCursor: o.cursor || [0, 0, 0, 0],
     });
