@@ -52,13 +52,20 @@ World (`world3d.html`): the same liquid, stored in bricks where it is. Right: th
 | ![Terraced cascade](docs/screenshots/world-cascade.png) | ![Terraced cascade, stored bricks](docs/screenshots/world-cascade-bricks.png) |
 | Terraced cascade: six basins, 5 cm cells, t = 15 s | 1.92 M cells stored of 8.6 M |
 | ![Crate in an open sea](docs/screenshots/world-sea.png) | ![Crate in an open sea, stored bricks](docs/screenshots/world-sea-bricks.png) |
-| A crate dropped into a sea that is a formula: 5 cm cells, t = 1.8 s | 579 bricks exist: solved (blue), kept around them (grey), water at rest (amber). Ten seconds later there are none |
+| A crate dropped into a sea that is a formula: 5 cm cells, t = 1.8 s | 512 bricks exist: solved (blue), kept around them (grey), water at rest (amber). Ten seconds later there are none |
 | ![Crate in an open sea, the rings](docs/screenshots/world-sea-rings.png) | ![Crate in an open sea, the rings and the stored bricks](docs/screenshots/world-sea-rings-bricks.png) |
-| The same at t = 5 s, from further away: the rings have slowed down below what keeps water solved | They run on beyond the 587 bricks, on a map of the surface that the solved water writes |
+| The same at t = 5 s, from further away: the rings have slowed down below what keeps water solved | They run on beyond the 524 bricks, on a map of the surface that the solved water writes |
 | ![Launch in a harbour](docs/screenshots/world-harbour.png) | ![Launch in a harbour, stored bricks](docs/screenshots/world-harbour-bricks.png) |
 | A launch going round a harbour basin, 10 cm cells, t = 10 s | The bricks follow the boat and its wake; the buoys and the crate sleep until it passes |
 | ![Scattered buoys](docs/screenshots/world-buoys.png) | ![Scattered buoys, stored bricks](docs/screenshots/world-buoys-bricks.png) |
-| Five buoys up to 50 m apart, 10 cm cells, t = 21 s: a lump of water dropped next to one buoy six seconds ago and next to another a second ago | The 972 bricks around those two exist, and none around the other three |
+| Five buoys up to 50 m apart, 10 cm cells, t = 21 s: a lump of water dropped next to one buoy six seconds ago and next to another a second ago | The 974 bricks around those two exist, and none around the other three |
+
+The ground can be worked on while the water runs (*Raise* and *Dig*):
+
+| |
+|:-:|
+| ![Terraced cascade, its ground worked on](docs/screenshots/world-ground.png) |
+| The cascade at t = 11.7 s: a notch dug through the rim of the top basin five seconds ago, and an island raised in the second |
 
 The water of the next five scenes is shallow water on a map, and solved in 3D only where a
 map will not do. The inset shows who has it, per column of bricks (dark blue: the map, light
@@ -67,7 +74,7 @@ blue: the 3D solver, amber: copies of the map next to solved water, violet: sour
 | | |
 |:-:|:-:|
 | ![Mountain river to the sea](docs/screenshots/world-river.png) | ![Surf on a beach](docs/screenshots/world-surf.png) |
-| 720 m of river, 10 cm cells, t = 30 s: the fall in view and the pool below it are solved, 357 of 13 054 columns | Swell on a beach of 1 in 20, t = 40 s: the breaker near the view target is solved, the rest of the sea is the map's |
+| 720 m of river, 10 cm cells, t = 30 s: the fall in view and the pool below it are solved, 356 of 13 057 columns | Swell on a beach of 1 in 20, t = 40 s: the breaker near the view target is solved, the rest of the sea is the map's |
 | ![Dam failure](docs/screenshots/world-dam.png) | ![Dam failure, later](docs/screenshots/world-dam-later.png) |
 | Dam failure, t = 8 s: five seconds after the gate went up | t = 30 s: the flood has gone down the valley as a wave on the map |
 | ![Sea cave and blowhole](docs/screenshots/world-cave.png) | ![Sinkhole and spring](docs/screenshots/world-spring.png) |

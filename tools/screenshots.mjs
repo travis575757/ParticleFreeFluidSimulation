@@ -46,6 +46,9 @@ const SHOTS = [
   { name: 'world-cave', page: 'world3d.html?scene=cave', steps: 1445 },
   { name: 'world-spring', page: 'world3d.html?scene=spring', steps: 2400 },
   { name: 'app-world-surf', page: 'world3d.html?scene=surf', steps: 2400, ui: true },
+  // ... the ground worked on while the water runs, as the Raise and Dig tools do it (World.editTerrain):
+  // strokes of [first step, last step, x, z, radius, cells per second]
+  { name: 'world-ground', page: 'world3d.html?scene=cascade&target=66,108,0&dist=210&yaw=0.9&pitch=0.5', steps: 700, ground: [[400, 460, 55, 6, 9, -10], [400, 500, 96, -12, 14, 10]] },
   // ... a ship: holed under the bow, going down after the second hole, on the bed
   { name: 'world-ship', page: 'world3d.html?scene=ship', steps: 840 },
   { name: 'world-ship-bricks', page: 'world3d.html?scene=ship&bricks', steps: 840 },
@@ -94,8 +97,12 @@ try {
     await page.waitForFunction(() => window.__frames > 5 || window.__error, { timeout: 60000 });
     let done = 0;
     for (const n of at || [shot.steps]) {
-      const info = await page.evaluate(async (k) => {
+      const info = await page.evaluate(async (k, from, ground) => {
         for (let i = 0; i < k; i++) {
+          for (const [a, b, x, z, r, rate] of ground) {
+            const W = window.world;
+            if (from + i >= a && from + i < b) W.editTerrain([x, W.terrain.height(x, z), z], r, rate * W.sim.params.dt);
+          }
           window.app.stepOnce();
           if ((window.runner || window.world).bodies.length) await (window.runner || window.world).forcesReady;   // as in a real-time run
           if (window.world && i % 50 === 49) await new Promise((r) => setTimeout(r));   // (a long run: let the page breathe)
@@ -115,7 +122,7 @@ try {
           return row;
         }
         return `t ${R.time.toFixed(2)} s  mass ${(s.massRatio * 100).toFixed(4)} %  CFL ${s.cfl.toFixed(1)}`;
-      }, n - done).catch((e) => { failed = true; return 'FAILED: ' + e.message; });
+      }, n - done, done, shot.ground || []).catch((e) => { failed = true; return 'FAILED: ' + e.message; });
       done = n;
       const file = path.join(out, at ? `${shot.name}-${String(n).padStart(4, '0')}.png` : `${shot.name}.png`);
       await (await page.$('#view')).screenshot({ path: file });
