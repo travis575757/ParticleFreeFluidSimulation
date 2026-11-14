@@ -1,0 +1,163 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>a world in which nothing moves does not step its solver (World.step, SparseSim.rest)</title>
+<canvas id="c" width="64" height="64"></canvas>
+<script type="module">
+// With every body asleep and no water moving, a world leaves its solver as it is (WORLD_PARAMS.rest).
+//   sea: the crate has landed and sleeps, the sea has taken its bricks back: from then on a step
+//     draws no pass of the solver, the solver's clock stands still and the world's runs on;
+//     water poured in wakes it, the splash is solved as ever, and it comes to rest again; a
+//     source of the scene that is due a second later wakes it when it is due; the books
+//     balance throughout.
+//   ship: with one hole she lies by the head and sleeps, and the world rests until the scene's
+//     second hole; she sinks and lies on the sea bed asleep, with the water in and around her
+//     still stored: that water is the same to the bit for as long as the world rests, and a
+//     third hole wakes ship and solver.
+//   ?only=sea|ship   &w.rest=0 (never at rest: the checks that it does rest then fail)
+import { GLContext } from '../src/gl.js';
+import { World } from '../src/world/world.js';
+import { WORLD_SCENES } from '../src/world/scenes.js';
+
+const q = new URLSearchParams(location.search);
+const only = q.get('only');
+const wparams = {};
+for (const [k, v] of q) if (k.startsWith('w.')) wparams[k.slice(2)] = Number(v);
+const log = (s) => console.log(s);
+let failed = 0;
+const check = (ok, what) => { if (!ok) failed++; log(`${ok ? 'PASS' : 'FAIL'}  ${what}`); };
+const pause = () => new Promise((r) => setTimeout(r));
+const e = (v, d = 1) => v.toExponential(d);
+
+try {
+  if (document.readyState !== 'complete') await new Promise((r) => window.addEventListener('load', r));
+  const glc = new GLContext(document.getElementById('c'));
+  log(`readback ${glc.readback} | ${glc.renderer}`);
+
+  const make = (name) => {
+    const world = new World(glc, 3, WORLD_SCENES[name].build(), { world: wparams });
+    const sim = world.sim;
+    const W = { world, sim, step: 0, edge: 0, peak: 0, worst: 0, mass: 0 };
+    // one step; the bodies' forces are part of it
+    W.one = async () => {
+      world.step();
+      await world.forcesReady;
+      W.step++;
+      if (sim.report) { W.edge += sim.report.edge; W.mass = Math.max(W.mass, sim.report.mass); }
+      W.peak = Math.max(W.peak, sim.bricks - sim.nHeld);
+    };
+    // What the books may be off by: as tests/sea.html has it, 1e-6 of the most liquid that was
+    // stored, and as much again for every second (what the solver itself loses in single precision).
+    W.tol = () => (1e-6 + 1e-6 * W.step * sim.params.dt) * Math.max(W.mass, 1);
+    // step until the world rests (true) or `most` steps have gone by
+    W.until = async (most) => {
+      for (let i = 0; i < most; i++) {
+        await W.one();
+        if (world.resting) return true;
+        if (i % 20 === 19) await pause();
+      }
+      return false;
+    };
+    W.run = async (n) => { for (let i = 0; i < n; i++) { await W.one(); if (i % 20 === 19) await pause(); } };
+    W.books = async () => { const b = await world.balanceSettled(); W.worst = Math.max(W.worst, Math.abs(b) / W.tol()); return b; };
+    // steps at rest: what they draw, and whether the solver's clock and its water stay as they are
+    W.idle = async (n) => {
+      const frame = sim.frame, time = world.time, passes = glc.passCount, rho = glc.read(sim.T.rho[0]).slice(), vel = glc.read(sim.T.vel[0]).slice();
+      let rested = 0;
+      for (let i = 0; i < n; i++) { await W.one(); if (world.resting) rested++; }
+      const drawn = (glc.passCount - passes) / n;
+      const r1 = glc.read(sim.T.rho[0]), v1 = glc.read(sim.T.vel[0]);
+      let same = true;
+      for (let k = 0; k < rho.length && same; k++) if (rho[k] !== r1[k] || vel[k] !== v1[k]) same = false;
+      return { rested, drawn, clock: sim.frame - frame, time: (world.time - time) / sim.params.dt, same };
+    };
+    return W;
+  };
+  // passes of a step of the same scene when nothing is stored and the world may not rest
+  const idleCost = async (name, steps) => {
+    const world = new World(glc, 3, WORLD_SCENES[name].build(), { world: { ...wparams, rest: 0 } });
+    for (let i = 0; i < steps; i++) { world.step(); await world.forcesReady; if (i % 20 === 19) await pause(); }
+    const passes = glc.passCount;
+    for (let i = 0; i < 30; i++) { world.step(); await world.forcesReady; }
+    const out = { drawn: (glc.passCount - passes) / 30, bricks: world.sim.bricks };
+    world.dispose();
+    return out;
+  };
+
+  // ------------------------------------------------------------------ a crate into the open sea
+  if (!only || only === 'sea') {
+    const W = make('sea');
+    const { world, sim } = W;
+    const rested = await W.until(3600);
+    const at = W.step, crate = world.bodies[0];
+    check(rested && crate.asleep && sim.bricks === 0, `sea: the crate lands (${W.peak} bricks solved at the most), sleeps, and the sea takes its bricks back; the world is at rest from step ${at} (${(at * sim.params.dt).toFixed(1)} s; ${sim.bricks} bricks left)`);
+    const a = await W.idle(120);
+    check(a.rested === 120 && a.clock === 0 && Math.round(a.time) === 120, `at rest a step leaves the solver alone: its clock stands still (${a.clock} steps in 120), the world's runs on (${a.time.toFixed(0)} steps), ${a.drawn.toFixed(1)} passes are drawn per step`);
+    const b0 = await W.books();
+    // water poured in beside the crate
+    const level = world.scene.water[0].level;
+    W.peak = 0;
+    world.pour([crate.pos[0] + 30, level + 12, crate.pos[2]], [0, -20, 0], 5);
+    await W.one();
+    const woke = !world.resting && sim.frame > 0;
+    for (let i = 0; i < 8; i++) { world.pour([crate.pos[0] + 30, level + 12, crate.pos[2]], [0, -20, 0], 5); await W.one(); }
+    const again = await W.until(3600);
+    const b1 = await W.books();
+    check(woke && W.peak > 20 && again && sim.bricks === 0, `water poured in wakes the solver at once; its splash is solved (${W.peak} bricks) and after ${W.step - at - 129} steps the world is at rest again, nothing stored`);
+    // a source of the scene's, due in a second: a lump of water over the sea
+    const due = world.time + 1;
+    world.emitters.push({ prim: { type: 'ball', center: [crate.pos[0] - 30, level + 20, crate.pos[2]], radius: 4.5, vel: [0, -20, 0] }, from: due, until: due + 0.017 });
+    let waited = 0;
+    while (world.time < due - 1e-9 && waited < 100) { await W.one(); if (world.resting) waited++; }
+    const before = world.resting;
+    W.peak = 0;
+    await W.run(40);
+    const lump = !world.resting && W.peak > 10;
+    const third = await W.until(3600);
+    const b2 = await W.books();
+    check(before && waited >= 59 && lump && third && sim.bricks === 0, `a source that is due a second later finds the world at rest (${waited} steps of it) and wakes it when it is due: ${W.peak} bricks solved; at rest again ${W.step} steps into the run, nothing stored`);
+    check(W.worst <= 1 && W.edge === 0, `no water lost or gained: off by ${e(b0)} cells at rest, ${e(b1)} after ${sim.added.toFixed(0)} cells were poured in and let fall, ${e(b2)} at the end (${(100 * W.worst).toFixed(0)} % at the most of the ${e(W.tol())} cells allowed after ${(W.step * sim.params.dt).toFixed(0)} s); the liquid never reached the edge of the stored bricks (${W.edge})`);
+    world.dispose();
+    const c = await idleCost('sea', at);
+    log(`  without it a step of the same idle sea draws ${c.drawn.toFixed(1)} passes (${c.bricks} bricks stored)`);
+  }
+
+  // ------------------------------------------------------------------ the ship
+  if (!only || only === 'ship') {
+    const W = make('ship');
+    const { world, sim } = W;
+    const ship = world.hulls[0];
+    // (with one hole she settles by the head and sleeps: the world rests until the second one)
+    let rested = false, first = 0, between = 0, afloat = 0;
+    for (let i = 0; i < 6000 && !rested; i++) {
+      await W.one();
+      if (world.resting) {
+        if (ship.holes < 2) { between++; afloat = sim.bricks - sim.nHeld; if (!first) first = W.step; } else rested = true;
+      }
+      if (i % 20 === 19) await pause();
+    }
+    const at = W.step;
+    const solved = sim.bricks - sim.nHeld;
+    check(first > 0 && between > 100, `ship: with one hole she lies by the head and sleeps; the world is at rest from step ${first} (${(first * sim.params.dt).toFixed(1)} s) for ${between} steps, ${afloat} bricks of her water solved, until the second hole wakes it`);
+    check(rested && ship.asleep && ship.holes === 2 && solved > 100, `holed twice she sinks and sleeps on the sea bed (${ship.pos[1].toFixed(1)} cells up); the world is at rest from step ${at} (${(at * sim.params.dt).toFixed(1)} s) with her water still stored (${solved} bricks solved, ${sim.nHeld} of water at rest around them)`);
+    const a = await W.idle(120);
+    check(a.rested === 120 && a.clock === 0 && a.same, `at rest the stored water is the same to the bit after 120 steps (density and velocity of every brick), the solver's clock stands still, ${a.drawn.toFixed(1)} passes are drawn per step`);
+    const b0 = await W.books();
+    // a third hole, amidships
+    const hit = world.breachAt(ship.pos, 2.5, 1e3);
+    await W.one();
+    const woke = hit === ship && !ship.asleep && !world.resting;
+    await W.run(240);
+    const b1 = await W.books();
+    check(woke && sim.frame > 0 && ship.holes === 3, `a third hole wakes ship and solver (${ship.holes} holes; ${sim.bricks - sim.nHeld} bricks solved 240 steps later)`);
+    check(W.worst <= 1 && W.edge === 0, `no water lost or gained: off by ${e(b0)} cells at rest, ${e(b1)} after (${(100 * W.worst).toFixed(0)} % at the most of the ${e(W.tol())} cells allowed after ${(W.step * sim.params.dt).toFixed(0)} s, ${W.mass.toFixed(0)} cells stored at the most); the liquid never reached the edge of the stored bricks (${W.edge})`);
+    world.dispose();
+  }
+
+  log(failed ? `${failed} check(s) failed` : 'all checks passed');
+} catch (err) {
+  console.log('ERROR ' + (err.stack || err));
+  window.__error = String(err);
+}
+window.__done = true;
+</script>

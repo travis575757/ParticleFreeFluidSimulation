@@ -285,7 +285,7 @@ function buildPanel() {
     ['flow', 'In / out', 'Totals of the sources and of the drains, in cells of liquid'],
     ['bodies', 'Bodies awake', 'Rigid bodies that are being stepped, of all there are. A body that has been slow for a while sleeps, and stops keeping the water around it solved, until that water moves again.'],
     ['cfl', 'Fastest liquid', 'Largest liquid speed in cells per time step (the limit of the brick storage is 14)'],
-    ['perf', 'Step / frame', 'GPU time of one simulation step and frame rate'],
+    ['perf', 'Step / frame', 'GPU time of one simulation step and frame rate. "At rest": every body sleeps and no water moves, and the solver is not stepped until something does.'],
     ['gpu', 'Runs on', 'The whole solver executes as WebGL2 shader passes on this GPU'],
   ]);
   readouts.gpu.textContent = gpuName();
@@ -365,7 +365,7 @@ function updateStats() {
     readouts.flow.textContent = `${fmt(bk.added)} / ${fmt(bk.removed)}`;
   }
   if (rep) readouts.cfl.textContent = (rep.maxSpeed * sim.params.dt).toFixed(1);
-  readouts.perf.textContent = `${stepMs > 0 ? stepMs.toFixed(1) + ' ms' : '–'} · ${fps.toFixed(0)} fps`;
+  readouts.perf.textContent = `${world.resting ? 'at rest' : stepMs > 0 ? stepMs.toFixed(1) + ' ms' : '–'} · ${fps.toFixed(0)} fps`;
 }
 
 // The map of who has the water (World.tiers), one pixel per column of bricks, with a cross where the camera looks.

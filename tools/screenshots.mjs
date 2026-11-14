@@ -79,10 +79,11 @@ try {
       // the whole page, running: captured on the first frame at or after the given step
       await page.setViewport({ width: 1280, height: 900 });
       await page.goto(`http://localhost:${port}/${shot.page}&capture`, { waitUntil: 'load' });
-      await page.waitForFunction((n) => (window.runner || window.world)?.sim.frame >= n || window.__error, { timeout: 300000 }, shot.steps);
+      // (a world counts its own steps: the solver's count stands still while nothing moves)
+      await page.waitForFunction((n) => (window.world ? window.world.steps : window.runner?.sim.frame) >= n || window.__error, { timeout: 300000 }, shot.steps);
       const file = path.join(out, `${shot.name}.png`);
       await page.screenshot({ path: file });
-      console.log(`${path.relative(process.cwd(), file)}  step ${await page.evaluate(() => (window.runner || window.world).sim.frame)}  ${(fs.statSync(file).size / 1024).toFixed(0)} kB`);
+      console.log(`${path.relative(process.cwd(), file)}  step ${await page.evaluate(() => (window.world ? window.world.steps : window.runner.sim.frame))}  ${(fs.statSync(file).size / 1024).toFixed(0)} kB`);
       await page.close();
       continue;
     }

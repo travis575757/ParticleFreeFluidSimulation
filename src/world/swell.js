@@ -105,7 +105,9 @@ export class Swell {
       ...sim._U(L0), ...sim._solidUniforms(), ...sim._prims(shells, 'H'), uZ: f, uLiq: L0.liq, uVel: sim.T.vel[0], uOrigin: this.origin, uReach: p.reach, uBand: p.band, uLoss: p.loss,
     });
     glc.draw(P.show, [this.D, this.D2], { uZ: this.Z, uE: this.E, uInvCell: 1 / p.cell });
-    if (sim.frame % 20 === 0) this._look(solved);
+    // (by its own count: the solver's clock stands still while it rests)
+    this._steps = (this._steps || 0) + 1;
+    if (this._steps % 20 === 0) this._look(solved);
   }
 
   /** How large the waves still are (without blocking); with nothing left of them and no solved water the map is switched off. */

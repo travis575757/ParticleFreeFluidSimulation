@@ -28,6 +28,13 @@ export const WORLD_PARAMS = {
   // with a height field: the water around what the camera looks at is solved, as far as the budget of solved bricks allows
   // rigid bodies and the liquid are solved together (src/couple.js; 0: they take turns, stepBodies in src/bodies.js)
   couple: 1,
+  // With every body asleep and no water moving, the solver is not stepped (SparseSim.rest): a
+  // ship that has sunk, a sea its buoys sleep on. `restAfter` steps without anything as fast
+  // as waking, and without a brick about to change, come first (SparseSim.stir): as long as a
+  // brick needs to have only drifted before it is held. Not over a height field, whose water
+  // has a flow of its own, and not with drains.
+  rest: 1,
+  restAfter: 300,
   focusRadius: 0,         // cells around the focus (setFocus) within which the height field's water is solved (0: nowhere on that account)
   focusHold: 1.5,         // ... and stays solved within this many times the radius
 };
@@ -123,6 +130,8 @@ export class World {
   reset() {
     const sc = this.scene, dim = this.dim;
     this.time = 0;
+    this.steps = 0;           // steps of the world (the solver's own count, sim.frame, stands still while the world rests)
+    this.resting = false;
     this.emitters = (sc.emitters || []).map((e) => ({ from: 0, until: Infinity, ...e }));
     this.drains = sc.drains || [];
     for (const b of this.kin || []) if (b.dispose) b.dispose();
@@ -227,6 +236,7 @@ export class World {
     for (const b of [...this.bodies, ...this.kin]) {
       if (!(b instanceof Hull) || b.sd(p) > reach) continue;
       b.breach(p, radius);
+      this.sim.stir();
       if (b.asleep) this.wake(b);
       return b;
     }
@@ -243,6 +253,7 @@ export class World {
     b.asleep = false;
     b.still = 0;
     this.bodies.push(b);
+    this.sim.stir();
     return b;
   }
   removeBodies() { for (const b of this.bodies) if (b.dispose) b.dispose(); this.bodies = []; }
@@ -309,6 +320,7 @@ export class World {
 
   wake(b) {
     if (!b.asleep) return;
+    this.sim.stir();
     b.asleep = false;
     b.kinematic = false;
     b.still = 0;
@@ -423,6 +435,7 @@ export class World {
     const sim = this.sim, sc = this.scene;
     const dt = sim.params.dt;
     const t1 = this.time + dt;
+    this.steps++;
     for (const e of this.emitters) {
       if (this.time < e.from || this.time >= e.until) continue;
       // (every, for: on for `for` seconds every `every` seconds)
@@ -435,8 +448,16 @@ export class World {
 
     if (this.kin.length) sc.kinematic(t1).forEach((s, i) => this._pose(this.kin[i], s, dt));
     const cp = this.coupler;
+    if (this.bodies.length) this._sleepBodies();
+    this.resting = this._rests();
+    if (this.resting) {
+      // (nothing is stepped: the bodies sleep, and the solver stays as it is)
+      sim.rest();
+      this.time = t1;
+      this.forcesReady = Promise.resolve();
+      return;
+    }
     if (this.bodies.length) {
-      this._sleepBodies();
       const statics = [...this.statics, ...this.kin];
       if (cp) {
         const first = this.solids.length + this.kin.length;
@@ -454,6 +475,21 @@ export class World {
     // resolves once the liquid forces of this step have arrived (within a frame in the app;
     // solved together with the liquid, they are part of the step)
     this.forcesReady = cp ? Promise.resolve() : this._requestForces(awake, dt);
+  }
+
+  /** Is there nothing for the solver to do in this step? (see WORLD_PARAMS.rest) */
+  _rests() {
+    const P = this.params, sim = this.sim;
+    if (!P.rest || this.hf || !sim.water.length || !sim.params.lifecycle || this.drains.length) return false;
+    // (a hull that has been holed lets water in, whoever made the hole: Hull.breach counts them)
+    let holes = 0;
+    for (const b of this.bodies) holes += b.holes || 0;
+    for (const b of this.kin) holes += b.holes || 0;
+    if (holes !== this._holes) { this._holes = holes; sim.stir(); }
+    if (sim.frame - sim.stirAt < P.restAfter) return false;
+    if (this.bodies.some((b) => !b.asleep) || this.kin.some((b) => b.still < P.bodySleepAfter)) return false;
+    const m = sim.mouse;
+    return !(m.radius > 0 && m.strength > 0);
   }
 
   /** The liquid's force on the bodies that are awake (as Runner._requestForces of the tank simulators). */
@@ -510,6 +546,7 @@ export class World {
     for (const b of this.bodies) {
       if (b.asleep && Math.hypot(b.pos[0] - pos[0], b.pos[2] - pos[2]) < radius + b.extent + 2) this.wake(b);
     }
+    sim.stir();
     // (for the tests: how often the ground has been worked on, and where last)
     this.terrainEdits = (this.terrainEdits || 0) + 1;
     this.terrainSpot = [pos[0], pos[1], pos[2]];

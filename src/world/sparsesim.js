@@ -1064,6 +1064,7 @@ export class SparseSim extends FluidSim {
     this._unbooked = [];              // reports made but not yet entered into the books (_book), oldest first
     this._run = 0;                    // counts the resets: a report read back after one belongs to nothing
     this._lag = 0;                    // steps the reports took to arrive lately (reportAsync)
+    this.stirAt = 0;                  // the last step at which something moved or the bricks were about to change (see stir)
     this.report = null;               // summary of the last report acted on
     this.refused = 0;                 // bricks that were wanted while the pool was full
     this.unpromoted = 0;              // columns of a height field that should have been solved with the budget used up (counted per look)
@@ -1417,6 +1418,7 @@ export class SparseSim extends FluidSim {
     this._unbooked = [];
     this._run++;
     this._lag = 0;
+    this.stirAt = this.frame;
     this.report = null;
     this.refused = 0;
     this.freedMass = 0;
@@ -1435,6 +1437,7 @@ export class SparseSim extends FluidSim {
   editLiquid(prims, op = 1, { meter = false } = {}) {
     const { glc, prog: P, B } = this;
     if (!prims.length) return;
+    this.stir();
     if (op === 1) this.ensurePrims(prims);
     // the cells an edit can change lie within half a cell of its primitives
     const boxes = prims.map((p) => this._primBox(p, 1));
@@ -1546,6 +1549,24 @@ export class SparseSim extends FluidSim {
       this.added += d[0]; this.removed += d[1];
       return (this.books = { added: this.added, removed: this.removed, ...now });
     }, () => null).finally(() => { this._ledgerBusy = false; }));
+  }
+
+  /**
+   * Something has changed that the reports cannot know of yet (liquid put in or taken out, a
+   * body woken, a hull holed): the solver has to run. `stirAt` is the last step at which that
+   * was so, or at which a report showed water as fast as waking, liquid in the air, or bricks
+   * about to be held, woken, stored or dropped. A world whose bodies all sleep stops stepping
+   * a solver that has not been stirred for a while (World.step).
+   */
+  stir() { this.stirAt = this.frame; }
+
+  /**
+   * In place of step() while nothing moves: the solver is left as it is, to the bit, and its
+   * clock stands still; the waves on the map of the surface run on, and the foam fades.
+   */
+  rest() {
+    if (this.swell) this.swell.step();
+    if (this.foam) this.foam.step();
   }
 
   step() {
@@ -1681,6 +1702,8 @@ export class SparseSim extends FluidSim {
     const far = NB_REACH * B;        // what the flags of the GPU cover
     const stamp = ++this._stamp;
     const want = [], wake = [], hard = [], falls = [], dry = [], held = [], sleep = [];
+    // (see stir)
+    let stirred = !water || set.version !== this._stirVersion;
     const sum = { frame: rep.frame, wet: 0, dry: 0, held: 0, edge: 0, mass: 0, excess: 0, maxSpeed: 0, looked: 0, refused: 0 };
     const inflow = p.inflow * B ** (dim - 1) * p.reportEvery;
     const lo = [0, 0, 0], hi = [0, 0, 0];
@@ -1739,6 +1762,8 @@ export class SparseSim extends FluidSim {
       if (C[4 * s] >= 0) this.wakingAt[s] = stamp;
       const strong = D[4 * s + 1] >= 4194304;
       if (strong) this.strongAt[s] = stamp;
+      // (liquid below a surface as fast as waking, or any liquid that is not of the water at rest and moves)
+      if (strong || C[4 * s] >= 0 || (wet && !fw && speed * p.dt > p.wakeSpeed)) stirred = true;
       if (water && C[4 * s] >= 0 && (flags & 1 || late)) {
         // (fast liquid that is not of the sea, or in the brick over its surface: something is
         // falling in, or being thrown up)
@@ -1875,9 +1900,11 @@ export class SparseSim extends FluidSim {
       }
       return false;
     };
+    if (want.length || wake.length || hard.length || going.size) stirred = true;
     for (const s of held) {
       if (F[4 * s + 3] > 0.5 || this.stampOf[s] === stamp || this.pinOf[s] === this._pinStamp) { this.quiet[s] = 0; continue; }
       this.quiet[s] = (this.quiet[s] || 0) + 1;
+      stirred = true;                 // (on its way out)
       if (this.quiet[s] < p.freeAfter) continue;
       // (the report is of a state some steps back: a brick beside it may have been woken since)
       if (besideSolved(rep.bx[s], rep.by[s], rep.bz[s])) { this.quiet[s] = 0; continue; }
@@ -1886,12 +1913,15 @@ export class SparseSim extends FluidSim {
     for (const s of dry) {
       if (F[4 * s + 3] > 0.5 || this.stampOf[s] === stamp) { this.quiet[s] = 0; continue; }
       this.quiet[s] = (this.quiet[s] || 0) + 1;
+      stirred = true;
       if (this.quiet[s] < p.freeAfter) continue;
       this.freedMass += A[4 * s];
       this.removeBrick(rep.bx[s], rep.by[s], rep.bz[s]);
     }
     sum.dry = dry.length;
     this.report = sum;
+    if (stirred || set.version !== this._stirVersion) this.stirAt = this.frame;
+    this._stirVersion = set.version;
   }
 
   // ------------------------------------------------------------------ dense views

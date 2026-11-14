@@ -145,7 +145,7 @@ function buildPanel() {
     ['couple', 'Coupling', 'Iterations in which hull and pressure were made to agree in the last step, and the hull\'s added mass in heave in units of its own mass'],
     ['budget', 'Unaccounted for', 'Liquid above the water at rest, with what the bodies displace and what the water at rest has taken in, against what the scene started with: zero if nothing is lost (cells of liquid)'],
     ['cfl', 'Fastest liquid', 'Largest liquid speed in cells per time step'],
-    ['perf', 'Step / frame', 'GPU time of one simulation step and frame rate'],
+    ['perf', 'Step / frame', 'GPU time of one simulation step and frame rate. "At rest": every body sleeps and no water moves, and the solver is not stepped until something does.'],
     ['gpu', 'Runs on', 'The whole solver executes as WebGL2 shader passes on this GPU'],
   ]);
   readouts.gpu.textContent = gpuName();
@@ -206,7 +206,7 @@ function updateStats() {
   const bk = sim.books;
   if (bk) readouts.budget.textContent = `${world.balance().toFixed(2)} of ${Math.round(bk.stored)}`;
   if (rep) readouts.cfl.textContent = (rep.maxSpeed * dt).toFixed(2);
-  readouts.perf.textContent = `${stepMs > 0 ? stepMs.toFixed(1) + ' ms' : '–'} · ${fps.toFixed(0)} fps`;
+  readouts.perf.textContent = `${world.resting ? 'at rest' : stepMs > 0 ? stepMs.toFixed(1) + ' ms' : '–'} · ${fps.toFixed(0)} fps`;
 }
 
 function tick() {

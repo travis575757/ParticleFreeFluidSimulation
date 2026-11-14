@@ -191,8 +191,8 @@ apps with synthetic mouse input (`2d|3d|world`). Both tools take
 `--browser chrome|firefox|librewolf`; `npm test` runs the interaction checks in Chrome,
 `npm run test:firefox` and `npm run test:librewolf` in the other two. The pages for world mode
 (`golden.html`, `sparse.html`, `world.html`, `held.html`, `sea.html`, `swell.html`,
-`heightfield.html`, `handover.html`, `hull.html`, `foam.html`, `terrain.html`) are
-described [there](#world-mode).
+`heightfield.html`, `handover.html`, `hull.html`, `foam.html`, `terrain.html`, `rest.html`)
+are described [there](#world-mode).
 
 ## Where the paper leaves a choice open
 
@@ -760,6 +760,44 @@ fills goes over slowly, and jitters through the middle of a band that travels.) 
 when grabbed, when a moving body comes near, to water faster than 0.15 cells per step next
 to it, and to any waking water once that water has been at rest for 4 s. (The water a body
 stirred up itself must not wake it again.)
+
+*A world at rest.* With every body asleep and no water moving there is nothing for the
+solver to do, and still a step of it costs what its passes cost. Such a world does not step
+its solver (`WORLD_PARAMS.rest`, `SparseSim.rest`). It comes to that when for 300 steps no
+report has shown liquid below a surface as fast as waking (0.06 cells per step), liquid in
+the air that moves, or a brick about to be stored, woken, held or dropped; when every body
+sleeps and no scripted one moves; and when no source, drain, brush, hole or dug ground has
+touched the water (`SparseSim.stir`). The solver is left as it is, to the bit, and its
+clock stands still. The world's clock, its events and sources, the map of waves and the foam
+run on, and whatever stirs the water (a source that comes on, the pour tool, a hole, a body
+grabbed or dropped) has the solver stepped again in that same step. (A hole counts however
+it was made: a hull counts its holes, and the world looks at the count.) Not over a height field,
+whose water has a flow of its own, and not in a scene with drains. The panel shows *at rest*
+in place of the step time.
+
+`tests/rest.html` (the numbers are Chrome's). The crate lands in the sea, sleeps, the sea
+takes its bricks back, and from 15.7 s the world is at rest: in 120 steps the solver's
+clock does not move, the world's does, and a step draws 40 passes (the map of waves and
+the foam). Water poured in has the solver stepped in that same step, 1081 bricks are
+solved for the splash, and 1055 steps later the world rests again with nothing stored. A
+source that is due a second later finds the world at rest for the 60 steps until then and
+wakes it when it is due. The ship with one hole lies by the head and sleeps: the world
+rests from 20.3 s for 585 steps, 892 bricks of her water stored, until the second hole
+wakes it. Sunk, she sleeps on the bed and the world rests from 69.1 s with 468 solved
+bricks and 192 held ones; after 120 steps density and velocity of every one of them are
+the same to the bit; a third hole wakes ship and solver. The books stay within 18 % (sea,
+53 s) and 40 % (ship, 75 s) of what the solver's own drift is allowed, 1e-6 of the water
+and as much again for every second.
+
+What it saves is water that was stored and stepped with nothing moving. The ship asleep
+with one hole, 1152 bricks: 8.3 ms a step before, 0.7 ms at rest. (The wreck on the bed,
+660 bricks, draws the same 40 passes a step.) The sea scenes gain next to nothing: a sea
+that has taken its bricks back drew 45 passes a step before and draws 40 now, the buoys
+rest only until the first lump of water falls, and the launch never stops. A minute of
+each with the rest switched off against on, in turn, the fastest of three to seven runs:
+sea 2.1 → 1.7 ms, buoys 10.4 → 10.8, harbour 10.6 → 10.5, ship 14.2 → 13.9, on a machine
+whose other work moved a run by 5 % and more: no step is slower for it that these runs
+can show.
 
 Three scenes use this, and a *Crate* tool drops crates into any of them:
 
@@ -1389,6 +1427,8 @@ Where these miss what was aimed at, and what else was found:
   when it is holed. Two hulls at the most, among the twelve solids of a scene.
 * A hull keeps the bricks around it stored and solved while it sleeps (660 around the
   wreck of scenario 12, 1152 around the ship afloat): what is in it is not water at rest.
+  Once the world is at rest (above) they cost memory and no time; with anything else awake
+  in the scene they are stepped as before.
 * Bodies and liquid solved together need one read-back per iteration that the step waits
   for, and a page whose read-back is scrambled cannot run them (World does not start there).
 * Ships have been tested on a sea at rest only: not on a height field, in swell that is

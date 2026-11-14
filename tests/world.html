@@ -9,7 +9,7 @@
 //   density that were in bricks when they were dropped, "evaporated")
 //   the liquid never reaches the edge of the stored bricks, no brick is refused or dropped wet
 // and prints how many cells are stored against the box around them.
-//   ?scene=waterfall|cascade  &steps=600  &every=100  &p.<param>=value  &time=1 (ms per step, synced)
+//   ?scene=waterfall|cascade  &steps=600  &every=100  &p.<param>=value  &w.<param of the world>=value  &time=1 (ms per step, synced)
 //   &until=seconds (the sources stop then)  &pour=x,y,z,radius,first step,last step  &erase=...
 import { GLContext } from '../src/gl.js';
 import { World } from '../src/world/world.js';
@@ -18,8 +18,11 @@ import { WORLD_SCENES } from '../src/world/scenes.js';
 const q = new URLSearchParams(location.search);
 const steps = Number(q.get('steps') || 600);
 const every = Number(q.get('every') || Math.max(1, Math.floor(steps / 6)));
-const params = {};
-for (const [k, v] of q) if (k.startsWith('p.')) params[k.slice(2)] = Number(v);
+const params = {}, wparams = {};
+for (const [k, v] of q) {
+  if (k.startsWith('p.')) params[k.slice(2)] = Number(v);
+  if (k.startsWith('w.')) wparams[k.slice(2)] = Number(v);
+}
 const log = (s) => console.log(s);
 let failed = 0;
 const check = (ok, what) => { if (!ok) failed++; log(`${ok ? 'PASS' : 'FAIL'}  ${what}`); };
@@ -33,7 +36,7 @@ try {
   const scene = WORLD_SCENES[name].build();
   // &until=seconds: the sources stop then
   if (q.get('until')) for (const e of scene.emitters) e.until = Number(q.get('until'));
-  const world = new World(glc, 3, scene, { params });
+  const world = new World(glc, 3, scene, { params, world: wparams });
   const sim = world.sim;
   const m0 = sim.measureSync().mass;
   log(`${name}: ${sim.bricks} bricks at the start, liquid ${m0.toFixed(1)} cells`);
