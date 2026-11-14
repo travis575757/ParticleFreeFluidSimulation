@@ -17,6 +17,8 @@ void main() {
 
 // Vertex shader of a pass that only covers some tiles of its target: one instanced quad per
 // tile, the tile's index in aSlot (see GLContext.drawTiles).
+const BASE0 = { uBase: 0 };
+
 export const VS_TILES = `#version 300 es
 layout(location = 0) in float aSlot;
 uniform vec2 uTileSize;     // texels
@@ -62,6 +64,20 @@ export class GLContext {
     gl.bindVertexArray(this._emptyVao);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
+    // What the context has been told last. A step is hundreds of passes, most of them with the
+    // textures, the program state and the uniforms of the pass before: nothing is sent twice.
+    // (All of it is set in this file and nowhere else.)
+    this._units = [];              // the texture on each unit
+    this._unit = 0;                // the active unit
+    this._prog = null;
+    this._vao = this._emptyVao;
+    this._fb = undefined;          // the framebuffer bound (undefined: not known)
+    this._vp = [-1, -1, -1, -1];
+    this._blend = false;
+    this._tileU = { uTileSize: null, uTilesPerRow: 0, uTargetInv: [0, 0] };   // what drawTiles adds to the uniforms of a pass
+    gl.disable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFunc(gl.ONE, gl.ONE);  // (the only blending there is: sums)
     gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     this.readback = this._testReadback();
@@ -122,25 +138,42 @@ export class GLContext {
     for (let i = 0; i < n; i++) {
       const info = gl.getActiveUniform(prog, i);
       const name = info.name.replace(/\[0\]$/, '');
-      uniforms.set(name, { loc: gl.getUniformLocation(prog, info.name), type: info.type, size: info.size });
+      // (a field of a struct, "G.n": values.G.n)
+      const dot = name.indexOf('.');
+      uniforms.set(name, { loc: gl.getUniformLocation(prog, info.name), type: info.type, size: info.size,
+        base: dot > 0 ? name.slice(0, dot) : null, field: dot > 0 ? name.slice(dot + 1) : null });
     }
     return { label, prog, uniforms };
   }
 
-  _setUniforms(p, values) {
+  /** `more`: values that go before those of `values` (what a kind of pass adds to its caller's). */
+  _setUniforms(p, values, more = null) {
     const gl = this.gl;
     let unit = 0;
     for (const [name, u] of p.uniforms) {
-      let v = values[name];
-      if (v === undefined) {
-        // struct field "G.n" -> values.G.n
-        const dot = name.indexOf('.');
-        if (dot > 0) {
-          const base = values[name.slice(0, dot)];
-          if (base !== undefined) v = base[name.slice(dot + 1)];
-        }
+      let v = more ? more[name] : undefined;
+      if (v === undefined) v = values[name];
+      if (v === undefined && u.base) {
+        const base = values[u.base];
+        if (base !== undefined) v = base[u.field];
       }
       if (v === undefined) throw new Error(`Program "${p.label}": uniform "${name}" not provided`);
+      if (u.type === gl.SAMPLER_2D) {
+        if (this._units[unit] !== v.tex) {
+          if (this._unit !== unit) { gl.activeTexture(gl.TEXTURE0 + unit); this._unit = unit; }
+          gl.bindTexture(gl.TEXTURE_2D, v.tex);
+          this._units[unit] = v.tex;
+        }
+        // (a program's samplers get the same units every time)
+        if (u.last !== unit) { gl.uniform1i(u.loc, unit); u.last = unit; }
+        unit++;
+        continue;
+      }
+      // (a program keeps its uniforms: one that has the value it had is not sent again)
+      if (typeof v === 'number' || typeof v === 'boolean') {
+        if (u.last === v) continue;
+        u.last = v;
+      } else if (!this._changed(u, v)) continue;
       switch (u.type) {
         case gl.FLOAT: if (u.size > 1) gl.uniform1fv(u.loc, v); else gl.uniform1f(u.loc, v); break;
         case gl.FLOAT_VEC2: gl.uniform2fv(u.loc, v); break;
@@ -152,15 +185,45 @@ export class GLContext {
         case gl.INT_VEC4: gl.uniform4iv(u.loc, v); break;
         case gl.FLOAT_MAT3: gl.uniformMatrix3fv(u.loc, false, v); break;
         case gl.FLOAT_MAT4: gl.uniformMatrix4fv(u.loc, false, v); break;
-        case gl.SAMPLER_2D:
-          gl.activeTexture(gl.TEXTURE0 + unit);
-          gl.bindTexture(gl.TEXTURE_2D, v.tex);
-          gl.uniform1i(u.loc, unit);
-          unit++;
-          break;
         default: throw new Error(`Program "${p.label}": unsupported uniform type for "${name}"`);
       }
     }
+  }
+
+  /** Is v (an array) another value than uniform u was given last? It is kept as the last one. */
+  _changed(u, v) {
+    const n = v.length;
+    let c = u.last;
+    if (!(c instanceof Float64Array) || c.length !== n) { u.last = Float64Array.from(v); return true; }
+    let diff = false;
+    // (a NaN is never the same: sent again, which does no harm)
+    for (let i = 0; i < n; i++) if (c[i] !== v[i]) { c[i] = v[i]; diff = true; }
+    return diff;
+  }
+
+  _use(p) {
+    if (this._prog !== p.prog) { this.gl.useProgram(p.prog); this._prog = p.prog; }
+  }
+
+  _setBlend(on) {
+    if (this._blend === on) return;
+    if (on) this.gl.enable(this.gl.BLEND); else this.gl.disable(this.gl.BLEND);
+    this._blend = on;
+  }
+
+  _bindVao(vao) {
+    if (this._vao !== vao) { this.gl.bindVertexArray(vao); this._vao = vao; }
+  }
+
+  _viewport(x, y, w, h) {
+    const v = this._vp;
+    if (v[0] === x && v[1] === y && v[2] === w && v[3] === h) return;
+    this.gl.viewport(x, y, w, h);
+    v[0] = x; v[1] = y; v[2] = w; v[3] = h;
+  }
+
+  _bindFb(fbo) {
+    if (this._fb !== fbo) { this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, fbo); this._fb = fbo; }
   }
 
   // ---- textures & framebuffers --------------------------------------------
@@ -170,6 +233,7 @@ export class GLContext {
     if (!F) throw new Error('unknown texture format ' + fmt);
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
+    this._units[this._unit] = tex;
     gl.texImage2D(gl.TEXTURE_2D, 0, gl[F.internal], w, h, 0, gl[F.format], gl.FLOAT, data);
     const filt = linear && (this.floatLinear || F.half) ? gl.LINEAR : gl.NEAREST;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
@@ -182,8 +246,15 @@ export class GLContext {
   deleteTexture(t) {
     if (!t) return;
     for (const [key, fbo] of this._fboCache) {
-      if (key.split(',').includes(String(t.id))) { this.gl.deleteFramebuffer(fbo); this._fboCache.delete(key); }
+      if (key.split(',').includes(String(t.id))) {
+        // (deleted while bound, the context goes back to the canvas)
+        if (this._fb === fbo) this._fb = undefined;
+        this.gl.deleteFramebuffer(fbo);
+        this._fboCache.delete(key);
+      }
     }
+    // (and the units it was on have nothing)
+    for (let i = 0; i < this._units.length; i++) if (this._units[i] === t.tex) this._units[i] = null;
     this.gl.deleteTexture(t.tex);
   }
 
@@ -193,14 +264,14 @@ export class GLContext {
     let fbo = this._fboCache.get(key);
     if (!fbo) {
       fbo = gl.createFramebuffer();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      this._bindFb(fbo);
       targets.forEach((t, i) => gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t.tex, 0));
       gl.drawBuffers(targets.map((_, i) => gl.COLOR_ATTACHMENT0 + i));
       const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
       if (status !== gl.FRAMEBUFFER_COMPLETE) throw new Error('Framebuffer incomplete: 0x' + status.toString(16));
       this._fboCache.set(key, fbo);
     } else {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      this._bindFb(fbo);
     }
     return fbo;
   }
@@ -208,12 +279,12 @@ export class GLContext {
   _bindTarget(target) {
     const gl = this.gl;
     if (target === null) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      this._bindFb(null);
+      this._viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
     } else {
       const targets = Array.isArray(target) ? target : [target];
       this._fbo(targets);
-      gl.viewport(0, 0, targets[0].w, targets[0].h);
+      this._viewport(0, 0, targets[0].w, targets[0].h);
     }
   }
 
@@ -222,10 +293,11 @@ export class GLContext {
   draw(p, target, uniforms, opts = {}) {
     const gl = this.gl;
     this._bindTarget(target);
-    gl.useProgram(p.prog);
+    this._use(p);
     this._setUniforms(p, uniforms);
-    if (opts.blend) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); } else gl.disable(gl.BLEND);
-    if (opts.viewport) gl.viewport(...opts.viewport);
+    this._setBlend(!!opts.blend);
+    if (opts.viewport) this._viewport(...opts.viewport);
+    this._bindVao(this._emptyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.passCount++;
   }
@@ -241,6 +313,7 @@ export class GLContext {
     gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0);
     gl.vertexAttribDivisor(0, 1);
     gl.bindVertexArray(this._emptyVao);
+    this._vao = this._emptyVao;
     const list = {
       vao, buf, count: 0,
       set: (indices) => {
@@ -248,7 +321,7 @@ export class GLContext {
         gl.bufferData(gl.ARRAY_BUFFER, indices instanceof Float32Array ? indices : new Float32Array(indices), gl.DYNAMIC_DRAW);
         list.count = indices.length;
       },
-      dispose: () => { gl.deleteBuffer(buf); gl.deleteVertexArray(vao); },
+      dispose: () => { this._bindVao(this._emptyVao); gl.deleteBuffer(buf); gl.deleteVertexArray(vao); },
     };
     return list;
   }
@@ -262,12 +335,16 @@ export class GLContext {
     if (!list.count) return;
     this._bindTarget(target);
     const t0 = Array.isArray(target) ? target[0] : target;
-    gl.useProgram(p.prog);
-    this._setUniforms(p, { ...uniforms, uTileSize: tile.size, uTilesPerRow: tile.perRow, uTargetInv: [1 / t0.w, 1 / t0.h] });
-    gl.disable(gl.BLEND);
-    gl.bindVertexArray(list.vao);
+    this._use(p);
+    const T = this._tileU;
+    T.uTileSize = tile.size;
+    T.uTilesPerRow = tile.perRow;
+    T.uTargetInv[0] = 1 / t0.w;
+    T.uTargetInv[1] = 1 / t0.h;
+    this._setUniforms(p, uniforms, T);
+    this._setBlend(false);
+    this._bindVao(list.vao);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, list.count);
-    gl.bindVertexArray(this._emptyVao);
     this.passCount++;
   }
 
@@ -282,20 +359,19 @@ export class GLContext {
     const gl = this.gl;
     this._bindTarget(target);
     if (clear) { gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
-    gl.useProgram(p.prog);
-    this._setUniforms(p, { ...uniforms, uBase: 0 });
-    gl.enable(gl.BLEND);
-    gl.blendEquation(gl.FUNC_ADD);
-    gl.blendFunc(gl.ONE, gl.ONE);
+    this._use(p);
+    this._setUniforms(p, uniforms, BASE0);
+    this._setBlend(true);
+    this._bindVao(this._emptyVao);
     const base = p.uniforms.get('uBase');
     if (!base) throw new Error(`Program "${p.label}": a scatter pass needs "uniform int uBase"`);
     for (const [start, n] of ranges || [[0, count]]) {
       for (let first = 0; first < n; first += this.maxPointsPerDraw) {
-        if (start + first > 0) gl.uniform1i(base.loc, start + first);
+        if (base.last !== start + first) { gl.uniform1i(base.loc, start + first); base.last = start + first; }
         gl.drawArrays(gl.POINTS, 0, Math.min(this.maxPointsPerDraw, n - first));
       }
     }
-    gl.disable(gl.BLEND);
+    this._setBlend(false);
     this.passCount++;
   }
 
@@ -338,6 +414,7 @@ export class GLContext {
     const gl = this.gl;
     const F = FORMATS[t.fmt];
     gl.bindTexture(gl.TEXTURE_2D, t.tex);
+    this._units[this._unit] = t.tex;
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl[F.format], gl.FLOAT, data);
   }
 
@@ -354,6 +431,47 @@ export class GLContext {
     const packed = new Float32Array(w * h * t.channels);
     for (let i = 0, n = w * h; i < n; i++) for (let c = 0; c < t.channels; c++) packed[i * t.channels + c] = out[i * 4 + c];
     return packed;
+  }
+
+  /**
+   * Several textures of one size (at most four) read back with one wait: for each the RGBA
+   * values of the rectangle, as read() gives them for a texture of four channels. Every read()
+   * is a round trip to the process that has the GPU, and the page stands still for each: the
+   * textures are copied into one, side by side, and that one is read.
+   */
+  readMany(ts, x = 0, y = 0, w = ts[0].w, h = ts[0].h) {
+    const n = ts.length;
+    if (n === 1) return [this.read(ts[0], x, y, w, h)];
+    if (n > 4) throw new Error('readMany: at most four textures');
+    if (!this._packProg) {
+      this._packProg = this.program('readMany', `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uA;
+uniform sampler2D uB;
+uniform sampler2D uC;
+uniform sampler2D uD;
+uniform ivec2 uFrom;
+uniform int uRows;
+out vec4 o;
+void main() {
+  ivec2 t = ivec2(gl_FragCoord.xy);
+  int k = t.y / uRows;
+  ivec2 s = uFrom + ivec2(t.x, t.y - k * uRows);
+  o = k == 0 ? texelFetch(uA, s, 0) : k == 1 ? texelFetch(uB, s, 0) : k == 2 ? texelFetch(uC, s, 0) : texelFetch(uD, s, 0);
+}`);
+    }
+    let t = this._packTex;
+    if (!t || t.w < w || t.h < n * h) {
+      const size = [Math.max(w, t ? t.w : 0), Math.max(n * h, t ? t.h : 0)];
+      if (t) this.deleteTexture(t);
+      t = this._packTex = this.texture(size[0], size[1], 'rgba32f');
+    }
+    this.draw(this._packProg, t, { uA: ts[0], uB: ts[1], uC: ts[2] || ts[0], uD: ts[3] || ts[0], uFrom: [x, y], uRows: h }, { viewport: [0, 0, w, n * h] });
+    this.passCount--;         // (not a pass of the solver)
+    const all = this.read(t, 0, 0, w, n * h);
+    return ts.map((_, i) => all.subarray(i * w * h * 4, (i + 1) * w * h * 4));
   }
 
   /** Asynchronous readback through a pixel-pack buffer + fence. Resolves to RGBA Float32Array. */

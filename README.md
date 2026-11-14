@@ -595,6 +595,22 @@ scattered over the pool, and the per-brick reports are read back every step. On 
 half of the stored bricks are margin: dry, but within reach. While the set of bricks changes
 quickly (water arriving in a new basin) a step costs up to 20 ms per million cells.
 
+A step that has little to do still draws all its passes: 565 in the buoys scene (352 of them
+smoothing the pressure, 36 for the map of waves) for 768 bricks. Each pass made thirty-odd
+calls into WebGL to bind its program, textures, target and viewport and to set its uniforms,
+nearly all of them to what they were already. `GLContext` keeps track of what is bound and
+of the value each uniform of each program last had, and leaves out the calls that change
+nothing: 17,900 calls a step become 5,500. The reports of the bricks and the forces on the
+bodies were read from three or four textures one after the other, the step waiting for the
+GPU each time; they are packed into one texture first (`readMany`), and a step that waited
+nine times waits three times. What the solver computes is the same to the bit (the dense
+reference, and density, velocity and bodies of the buoys scene after 400 steps).
+A step of the tree before against one of the tree after, run in turn, the faster of two or
+three runs each: sea 2.2 → 1.8 ms, buoys 11.1 → 10.1, harbour 11.2 → 9.7, ship 15.1 → 13.7,
+cascade 12.2 → 11.7, surf 13.9 → 12.7, river 32.7 → 32.0. (The machine was busy with other
+work while these were taken, so they compare the two trees and are not the times of the
+tables. The less there is stored, the more of a step is what its passes cost.)
+
 The app at 1280×800, drawing included, runs the cascade at 60 frames per second up to
 1.7 million stored cells and at 37–52 beyond 2 million, the waterfall at 52–55; LibreWolf 156
 gives the same rates.

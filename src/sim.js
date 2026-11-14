@@ -613,7 +613,7 @@ export class FluidSim {
   bodyForcesSync(prims, all = true, vel = undefined) {
     const { glc, T } = this;
     this._drawBodyForces(prims, vel);
-    const a = glc.read(T.force[0]), b = glc.read(T.force[1]), c = all ? glc.read(T.force[2]) : null;
+    const [a, b, c] = glc.readMany(all ? T.force : T.force.slice(0, 2));
     const NONE = 1e-6;
     return prims.map((_, i) => {
       const out = { force: [a[4 * i], a[4 * i + 1], a[4 * i + 2]], torque: [b[4 * i], b[4 * i + 1], b[4 * i + 2]] };

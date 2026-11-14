@@ -1568,7 +1568,7 @@ export class SparseSim extends FluidSim {
       this._book();
     };
     if (p.reportAsync) Promise.all(R.f.map((t) => glc.readAsync(t))).then(arrived, () => { rep.lost = true; this._book(); });
-    else arrived(R.f.map((t) => glc.read(t, 0, 0, set.perRow, Math.max(1, Math.ceil(n / set.perRow)))));
+    else arrived(glc.readMany(R.f, 0, 0, set.perRow, Math.max(1, Math.ceil(n / set.perRow))));
     this.reports.push(rep);
     if (this.reports.length > 32) this.reports.shift();
     return rep;
