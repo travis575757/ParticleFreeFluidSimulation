@@ -920,6 +920,17 @@ of its column, and none of the reasons above. It is solved for 120 steps at leas
 is solved again within 10 s of going back stays twice as long as the time before (a standing
 jump changed hands every two seconds).
 
+The slope is that of the water lying in the columns, not of all the liquid in them. A
+splash leaves crumbs in the air, each less than half a cell of liquid, which this solver
+moves along with the nearest liquid: over water that has come to rest they stay where they
+are. The depth of a texel is all the liquid of its column, so one crumb of a third of a
+cell is a step of 0.15 between texels two cells wide, and the column under it was never
+handed back. The slope is taken with and without what hangs over the water of a column,
+and the smaller of the two counts. (Without alone would not do: under a bubble all the
+water above it hangs.) The ball of the `drop` test below is all the map's again after 70 s;
+it took 76 s, and with a margin of three cells around the liquid instead of five, 233
+bricks were still solved after 80 s.
+
 Three rules came out of the scenes:
 
 * *Nothing far from the view.* With `hfPromoteRadius` R, no brick over the map is solved
@@ -1008,7 +1019,7 @@ with a window of solved bricks in its middle:
 | the same, half-width 20 (`&sigma=20`) | 10.4 % back, 92 % behind | 14.5 % back, 70 % behind | measured |
 | the same, half-width 10 | 12.7 % back, 91 % behind | | measured |
 | Water of both solvers together over 60 s of `wave` | off by 2.5e-6 at the most | 1.0e-5 | 1e-5 |
-| `drop`: a ball of water falls into the lake with nothing solved | 48 bricks solved at the most, all handed back after 17 s; no brick changes hands more than twice; water off by 8e-7 | 363 bricks, handed back after 76 s; 1.4e-6 | nothing left solved |
+| `drop`: a ball of water falls into the lake with nothing solved | 48 bricks solved at the most, all handed back after 17 s; no brick changes hands more than twice; water off by 8e-7 | 363 bricks, handed back after 70 s; 1.4e-6 | nothing left solved |
 
 Where these miss what was aimed at:
 

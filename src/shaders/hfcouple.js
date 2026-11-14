@@ -46,6 +46,13 @@ export function hfCoupleShaders(dim, cell) {
   //   o1.rg what goes through the texel's low-x face: the sum of rho * velocity over the cells
   //         at that face (solved or held: the solver moves the faces of both), and of rho
   //   o1.ba the same for the low-z face
+  //   o2.r  for a column of the 3D solver's: the part of S that hangs in the air over its water.
+  //         Going up a column of cells, what lies above an open cell with next to nothing in it
+  //         (less than GAP) that has liquid below it. A splash leaves crumbs there, each less
+  //         than half a cell of liquid, and the solver moves what is not liquid along with the
+  //         nearest liquid: over water that has come to rest they stay where they are. They are
+  //         part of the column's water and of its depth, and no part of its surface: see
+  //         "hfSlope" in src/shaders/sparse.js.
   S.column = `${H}
 uniform Grid G;
 ${FAR}
@@ -54,7 +61,10 @@ uniform sampler2D uFrac;
 uniform sampler2D uVel;
 layout(location = 0) out vec4 o0;
 layout(location = 1) out vec4 o1;
+layout(location = 2) out vec4 o2;
 const int CELL = ${cell};
+const int NCOL = ${dim === 3 ? cell * cell : cell};
+const float GAP = 0.05;
 // slot of brick b (-1 if it is not stored) and its state
 int storedSlot(ivec3 b, out float state) {
   state = 0.0;
@@ -69,6 +79,7 @@ void main() {
   ivec2 t = ivec2(gl_FragCoord.xy);
   o0 = vec4(0.0);
   o1 = vec4(0.0);
+  o2 = vec4(0.0);
   // world cell of the texel's corner, and its column of bricks
 #if DIM == 2
   ivec3 c0 = ivec3(int(floor(uHfMap.x + 0.5)) + uAnchor.x + t.x * CELL, 0, 0);
@@ -82,14 +93,21 @@ void main() {
   // the row of bricks with the lowest water of the texel in it
   vec2 bed = texelFetch(uHfBed, t, 0).rg;
   int yb = (int(floor(bed.x)) + uAnchor.y) >> LB;
-  float sum = 0.0, dev = 0.0, air = 0.0;
+  float sum = 0.0, dev = 0.0, air = 0.0, hang = 0.0;
   vec4 mom = vec4(0.0);
   bool bedSolved = false;
+  // per column of cells: 0 below its water, 1 in it, 2 above it
+  int st[NCOL];
+  for (int n = 0; n < NCOL; n++) st[n] = 0;
   for (int by = y0; by < y1; by++) {
     ivec3 b = ivec3(c0.x >> LB, by, c0.z >> LB);
     float state;
     int s = storedSlot(b, state);
-    if (s < 0) continue;
+    if (s < 0) {
+      // (no brick: air)
+      for (int n = 0; n < NCOL; n++) if (st[n] == 1) st[n] = 2;
+      continue;
+    }
     bool h = state > 1.5;
     if (!h && by == yb) bedSolved = true;
 #if DIM == 3
@@ -102,8 +120,15 @@ void main() {
           ivec3 l = ivec3((c0.x & BM) + i, j, (c0.z & BM) + kk);
           ivec2 tt = slotTexel(G.tiles, s, l);
           float rho = texelFetch(uRho, tt, 0).r;
-          float over = rho - farFill(b * BS + l, texelFetch(uFrac, tt, 0).a);
-          if (h) dev += over; else { sum += rho; air += over; }
+          float V = texelFetch(uFrac, tt, 0).a;
+          float over = rho - farFill(b * BS + l, V);
+          if (h) dev += over; else {
+            sum += rho; air += over;
+            int n = kk * CELL + i;
+            if (rho >= 0.5) { if (st[n] == 0) st[n] = 1; }
+            else if (st[n] == 1 && rho < GAP && V > 0.5) st[n] = 2;
+            if (st[n] == 2) hang += rho;
+          }
           if (i == 0 || kk == 0) {
             vec3 v = texelFetch(uVel, tt, 0).xyz;
             if (i == 0) mom.rg += vec2(rho * v.x, rho);
@@ -113,8 +138,10 @@ void main() {
       }
     }
   }
-  o0 = vec4(sum, dev, bedSolved && bed.y < 0.5 ? 1.0 : 0.0, air);
+  bool own = bedSolved && bed.y < 0.5;
+  o0 = vec4(sum, dev, own ? 1.0 : 0.0, air);
   o1 = mom;
+  o2 = vec4(own ? hang : 0.0, 0.0, 0.0, 0.0);
 }`;
 
   // The height field after "column" has counted (uC0; uPrev: its count before). The water of a

@@ -245,7 +245,7 @@ export class SparseSim extends FluidSim {
    */
   setHeightField(hf) {
     const glc = this.glc;
-    if (this.hfc) for (const t of [...this.hfc.C, this.hfc.C1, this.hfc.cols, this.hfc.look, this.hfc.W, ...(this.hfc.groups ? [this.hfc.groups.tex] : [])]) glc.deleteTexture(t);
+    if (this.hfc) for (const t of [...this.hfc.C, this.hfc.C1, this.hfc.C2, this.hfc.cols, this.hfc.look, this.hfc.W, ...(this.hfc.groups ? [this.hfc.groups.tex] : [])]) glc.deleteTexture(t);
     this.hf = hf || null;
     this.hfc = null;
     this.hfWater = null;
@@ -274,6 +274,7 @@ export class SparseSim extends FluidSim {
       P: this._hfProg.get(key),
       C: [tex(hf.n), tex(hf.n)],      // what "column" found: now, and when the height field last took account of it
       C1: tex(hf.n),                  // ... and the velocities it found at the faces of the texels
+      C2: tex(hf.n),                  // ... and what hangs in the air over the water of the columns that are solved
       W: tex(hf.n),                   // see hfWaterSync()
       per, nc,
       cols: tex(nc), look: tex(nc),   // per column of bricks: see _hfLook and _hfRows
@@ -295,6 +296,7 @@ export class SparseSim extends FluidSim {
     glc.clear(this.hfc.C[0]);
     glc.clear(this.hfc.C[1]);
     glc.clear(this.hfc.C1);
+    glc.clear(this.hfc.C2);
     this.hfLock();
   }
 
@@ -499,7 +501,7 @@ export class SparseSim extends FluidSim {
   _hfGather() {
     const { glc, hfc, T } = this;
     this._hfUpload();
-    glc.draw(hfc.P.column, [hfc.C[1], hfc.C1], { ...this._U(this.levels[0]), uRho: T.rho[0], uFrac: T.frac, uVel: T.vel[0] });
+    glc.draw(hfc.P.column, [hfc.C[1], hfc.C1, hfc.C2], { ...this._U(this.levels[0]), uRho: T.rho[0], uFrac: T.frac, uVel: T.vel[0] });
     hfc.C.reverse();
   }
 
@@ -929,6 +931,7 @@ export class SparseSim extends FluidSim {
       uSleep: hf ? [p.hfSleepSpeed / p.dt, p.hfSleepP * G, p.hfSleepRho] : [p.sleepSpeed / p.dt, p.sleepP * G, p.sleepRho],
       uWake: [(hf ? p.hfWakeSpeed : p.wakeSpeed) / p.dt, p.wakeP * G, p.strongSpeed / p.dt],
       uSlope: hf ? p.hfSleepSlope : 0,
+      uHfHang: hf ? this.hfc.C2 : this._noTerrain,
       uBedLayer: hf ? p.hfSleepBed : 0,
       // (mist that hovers has the speed gravity adds in one step, G, and loses it again in the next)
       // (over a height field more of it: what a splash leaves in the air there is the height field's

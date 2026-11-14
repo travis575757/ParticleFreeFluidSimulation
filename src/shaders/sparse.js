@@ -165,30 +165,42 @@ uniform vec3 uSleep;      // speed (cells/s), pressure, density
 uniform vec3 uWake;       // speed, pressure, speed that wakes a body that sleeps
 uniform vec2 uMist;       // mass (cells), speed (cells/s)
 uniform float uSlope;     // over a height field: a surface steeper than this is not at rest
+uniform sampler2D uHfHang; // ... per texel: the liquid that hangs in the air over the water of a solved column
 uniform float uBedLayer;  // ... and in this many cells over the bed neither pressure nor density is looked at
 layout(location = 0) out vec4 o0;   // mass, peak speed in wet cells, cells with density above uEdge on a face whose neighbour brick is not stored, peak rho
 layout(location = 1) out vec4 o1;   // lowest wet cell (brick-local), number of wet cells
 layout(location = 2) out vec4 o2;   // highest wet cell, excess: sum of rho - rho at rest
 layout(location = 3) out vec4 o3;   // lowest and highest waking cell (x + 16 y + 256 z; -1: none), cells not at rest (moving + 1024 * off + 4194304 if one is fast enough to wake a body), sum of rho at rest
 float pack(vec3 c) { return c.x + 16.0 * c.y + 256.0 * c.z; }
-// the steepest slope of the height field's surface between the texel over cell c and those next to it
+// The steepest slope of the height field's surface between the texel over cell c and those next
+// to it. The depth of a texel of the 3D solver's is all the liquid of its column, and what hangs
+// in the air over the water (uHfHang, see "column" in src/shaders/hfcouple.js) is no part of
+// its surface: one crumb of a third of a cell four cells up is a step of 0.15 in the depths of
+// texels two cells wide, and the column under it would never be handed back. So the slope is
+// taken twice, with and without what hangs, and the smaller one counts. (Without it alone would
+// not do: under a bubble all the water above it "hangs".)
 float hfSlope(ivec3 c) {
   ivec2 t;
   if (!hfTexel(c - uAnchor, t)) return 0.0;
+  float perArea = DIM == 3 ? uHfMap.z * uHfMap.z : uHfMap.z;
   vec3 a = hfLevel(t);
   // (in water a cell deep at least: where the ground runs through a column of the 3D solver's,
   // the depth is the water it holds and says little about where its surface is)
   if (a.x < a.y + 1.0) return 0.0;
+  float ah = a.x - texelFetch(uHfHang, t, 0).r * perArea;
   ivec2 n = textureSize(uHf, 0);
-  float s = 0.0;
+  float s = 0.0, sh = 0.0;
   for (int k = 0; k < 4; k++) {
     ivec2 u = t + ivec2(k == 0 ? 1 : k == 1 ? -1 : 0, k == 2 ? 1 : k == 3 ? -1 : 0);
     if (u.x < 0 || u.y < 0 || u.x >= n.x || u.y >= n.y) continue;
     if (texelFetch(uHfBed, u, 0).g > 0.5) continue;
     vec3 b = hfLevel(u);
-    if (b.x >= b.y + 1.0) s = max(s, abs(a.x - b.x));
+    if (b.x >= b.y + 1.0) {
+      s = max(s, abs(a.x - b.x));
+      sh = max(sh, abs(ah - (b.x - texelFetch(uHfHang, u, 0).r * perArea)));
+    }
   }
-  return s * uHfMap.z;
+  return min(s, sh) * uHfMap.z;
 }
 // Is cell c within uBedLayer cells of the bed of its texel of the height field? The bed of a
 // texel is the mean of its ground, and its copy fills the cells from that bed up. On sloping
