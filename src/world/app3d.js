@@ -27,6 +27,7 @@ const state = {
   mist: !q.has('nomist'),
   swell: !q.has('noswell'),
   detail: !q.has('nodetail'),
+  exact: !q.has('lattice'),   // hulls as they were drawn (off: as the lattice the solver has them on)
   focus: !q.has('nofocus'),   // with a height field: solve its water in 3D around what the camera looks at
   tiers: !q.has('notiers'),   // ... and show the map of who has the water
   renderScale: Number(q.get('rs')) || 1,
@@ -388,7 +389,7 @@ function tick() {
       applyPointer();
     }
     const showBrush = pointer.pos && state.tool !== 'orbit' && (pointer.inside || pointer.down);
-    renderer.render(world, camera, { overlay: state.overlay, mist: state.mist, swell: state.swell, detail: state.detail, cursor: showBrush ? [...pointer.pos, state.tool === 'hole' ? holeRadius() : state.brush] : null });
+    renderer.render(world, camera, { overlay: state.overlay, mist: state.mist, swell: state.swell, detail: state.detail, exact: state.exact, cursor: showBrush ? [...pointer.pos, state.tool === 'hole' ? holeRadius() : state.brush] : null });
     if (frame % 6 === 0) {
       // the totals of the sources and drains follow the same report the storage counters come from
       if (glc.readback !== 'scrambled') {

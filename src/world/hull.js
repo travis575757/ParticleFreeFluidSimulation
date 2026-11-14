@@ -14,7 +14,7 @@
 // For the rest of the code a hull is a Body: `volume` is the volume of the shell and `density`
 // the mass over that volume, so that density * volume is the mass, as for a ball or a box.
 import { Body, quatToWorldToLocal } from '../bodies.js';
-import { HULL_MARGIN } from '../shaders/common.js';
+import { HULL_MARGIN, MAX_EXACT, MAX_HOLES, MAX_HULLS } from '../shaders/common.js';
 
 function invert3(m) {
   const [a, b, c, d, e, f, g, h, i] = m;
@@ -131,6 +131,10 @@ export class Hull extends Body {
     this.lattice = { tex: this.tex, n: [n[0], n[1], n[2], this.cols] };
     this.upload();
 
+    // the drawing itself, for the renderer (null: it draws the lattice), and the holes made in it
+    this.drawing = flattenShape(sd.tree, com);
+    this.holeList = [];
+
     // the centre of mass is what the body turns about: that is where it is
     this.pos = this.toWorld(com);
     if (dim === 2) this.pos[2] = 0.5;
@@ -242,12 +246,16 @@ export class Hull extends Body {
       }
     }
     this.holes = (this.holes || 0) + 1;
+    // (more holes than the renderer takes: it goes back to the lattice, which has them all)
+    this.holeList.push([c[0], c[1], dim === 2 ? 0 : c[2], radius]);
+    if (this.holeList.length > MAX_HOLES) this.drawing = null;
     this._points = null;
     this.upload();
   }
 
   prim() {
-    return { type: 'sdf', half: this.half, lattice: this.lattice, center: this.pos, vel: this.vel, omega: this.omega, rot: quatToWorldToLocal(this.quat) };
+    return { type: 'sdf', half: this.half, lattice: this.lattice, center: this.pos, vel: this.vel, omega: this.omega, rot: quatToWorldToLocal(this.quat),
+      exact: this.drawing && { parts: this.drawing, holes: this.holeList } };
   }
   /** The body with its hollows filled, as a primitive (to empty a hull that starts afloat, say). */
   shellPrim() { return { ...this.prim(), shell: true }; }
@@ -257,19 +265,104 @@ export class Hull extends Body {
 
 // ---- shapes: distance functions to draw hulls with (cells, frame of the drawing) ----------------
 
+// Each carries a description of itself (tree) next to the function, so that a drawing made of
+// these can be handed to the renderer as it is (flattenShape); a function written by hand has
+// none, and neither has anything built on it.
+const tagged = (f, tree) => { f.tree = tree; return f; };
+const trees = (f) => (f.every((g) => g.tree) ? f.map((g) => g.tree) : null);
+
 /** Box with rounded corners: centre c, half extents h, corner radius r (2D: z ignored). */
 export function sdBox(dim, c, h, r = 0) {
-  return (x, y, z) => {
+  return tagged((x, y, z) => {
     const qx = Math.abs(x - c[0]) - h[0] + r, qy = Math.abs(y - c[1]) - h[1] + r, qz = dim === 2 ? -1e6 : Math.abs(z - c[2]) - h[2] + r;
     return Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0) - r;
-  };
+  }, dim === 3 ? { op: 'box', c, h, r } : null);
 }
 export const sdUnion = (...f) => (x, y, z) => { let d = Infinity; for (const g of f) d = Math.min(d, g(x, y, z)); return d; };
-export const sdIntersect = (...f) => (x, y, z) => { let d = -Infinity; for (const g of f) d = Math.max(d, g(x, y, z)); return d; };
+export const sdIntersect = (...f) => tagged((x, y, z) => { let d = -Infinity; for (const g of f) d = Math.max(d, g(x, y, z)); return d; },
+  trees(f) && { op: 'and', of: trees(f) });
 /** a without b */
-export const sdCut = (a, ...b) => (x, y, z) => { let d = a(x, y, z); for (const g of b) d = Math.max(d, -g(x, y, z)); return d; };
+export const sdCut = (a, ...b) => tagged((x, y, z) => { let d = a(x, y, z); for (const g of b) d = Math.max(d, -g(x, y, z)); return d; },
+  a.tree && trees(b) && { op: 'cut', from: a.tree, of: trees(b) });
 /** The half space behind the plane through p with the normal n (of length one). */
-export const sdPlane = (p, n) => (x, y, z) => (x - p[0]) * n[0] + (y - p[1]) * n[1] + (z - p[2]) * n[2];
+export const sdPlane = (p, n) => tagged((x, y, z) => (x - p[0]) * n[0] + (y - p[1]) * n[1] + (z - p[2]) * n[2], { op: 'plane', p, n });
+/** a, smaller by w all round (larger if w < 0) */
+export const sdInset = (a, w) => tagged((x, y, z) => a(x, y, z) + w, a.tree && { op: 'inset', of: a.tree, w });
+
+/**
+ * A drawing as the renderer takes it (exactCode in src/shaders/common.js): boxes and half
+ * spaces, those of the body first (group 0: their intersection), then those of each hollow
+ * (group k: their intersection, cut out of the body), moved by -origin. null if the drawing is
+ * anything else, or too much of it.
+ */
+export function flattenShape(tree, origin = [0, 0, 0]) {
+  if (!tree) return null;
+  // the boxes and half spaces whose intersection a tree is, or null
+  const convex = (t, add = 0) => {
+    if (t.op === 'box') return [{ a: [t.c[0] - origin[0], t.c[1] - origin[1], t.c[2] - origin[2], t.r], b: [t.h[0], t.h[1], t.h[2], add] }];
+    if (t.op === 'plane') return [{ a: [t.p[0] - origin[0], t.p[1] - origin[1], t.p[2] - origin[2], -1], b: [t.n[0], t.n[1], t.n[2], add] }];
+    if (t.op === 'inset') return convex(t.of, add + t.w);
+    if (t.op === 'and') { const parts = t.of.map((u) => convex(u, add)); return parts.every(Boolean) ? parts.flat() : null; }
+    return null;
+  };
+  const body = convex(tree.op === 'cut' ? tree.from : tree);
+  const hollows = tree.op === 'cut' ? tree.of.map((u) => convex(u)) : [];
+  if (!body || !hollows.every(Boolean)) return null;
+  // (in a hollow the smallest box first: where that is far off, the shader leaves the rest of the hollow out)
+  const size = (q) => (q.a[3] < 0 ? Infinity : q.b[0] * q.b[1] * q.b[2]);
+  for (const hw of hollows) hw.sort((p, q) => size(p) - size(q));
+  const parts = [...body.map((q) => ({ ...q, group: 0 })), ...hollows.flatMap((hw, k) => hw.map((q) => ({ ...q, group: k + 1 })))];
+  return parts.length <= MAX_EXACT ? parts : null;
+}
+
+/** What a drawing (flattenShape) with holes [[x, y, z, radius]] gives at l, in the frame of the body: sdExact() of the shaders. */
+export function drawingSd(parts, holes, l) {
+  let res = -Infinity, cur = -Infinity, g = 0;
+  for (const q of parts) {
+    if (q.group !== g) { res = g === 0 ? cur : Math.max(res, -cur); cur = -Infinity; g = q.group; }
+    const x = l[0] - q.a[0], y = l[1] - q.a[1], z = l[2] - q.a[2];
+    let e;
+    if (q.a[3] < 0) e = x * q.b[0] + y * q.b[1] + z * q.b[2];
+    else {
+      const r = q.a[3], qx = Math.abs(x) - q.b[0] + r, qy = Math.abs(y) - q.b[1] + r, qz = Math.abs(z) - q.b[2] + r;
+      e = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0) - r;
+    }
+    cur = Math.max(cur, e + q.b[3]);
+  }
+  res = g === 0 ? cur : Math.max(res, -cur);
+  for (const h of holes) res = Math.max(res, h[3] - Math.hypot(l[0] - h[0], l[1] - h[1], l[2] - h[2]));
+  return res;
+}
+
+/**
+ * The uniforms of exactCode (src/shaders/common.js) for a list of primitives: the drawings of
+ * its hulls, in the order packPrims (src/sim.js) binds their lattices. into: the arrays of the
+ * last call, to fill again. draw = false: none (the lattices are drawn).
+ */
+export function exactUniforms(list, P, into = null, draw = true) {
+  const X = into || {
+    [`u${P}XN`]: new Int32Array(2 * MAX_HULLS), [`u${P}XA`]: new Float32Array(4 * MAX_HULLS * MAX_EXACT), [`u${P}XB`]: new Float32Array(4 * MAX_HULLS * MAX_EXACT),
+    [`u${P}XG`]: new Int32Array(MAX_HULLS * MAX_EXACT), [`u${P}XH`]: new Float32Array(4 * MAX_HULLS * MAX_HOLES),
+  };
+  const N = X[`u${P}XN`], A = X[`u${P}XA`], B = X[`u${P}XB`], G = X[`u${P}XG`], H = X[`u${P}XH`];
+  N.fill(0);
+  let hull = 0;
+  for (const p of list) {
+    if (p.type !== 'sdf') continue;
+    if (draw && p.exact && hull < MAX_HULLS) {
+      p.exact.parts.forEach((q, i) => {
+        A.set(q.a, 4 * (hull * MAX_EXACT + i));
+        B.set(q.b, 4 * (hull * MAX_EXACT + i));
+        G[hull * MAX_EXACT + i] = q.group;
+      });
+      p.exact.holes.forEach((c, j) => H.set(c, 4 * (hull * MAX_HOLES + j)));
+      N[2 * hull] = p.exact.parts.length;
+      N[2 * hull + 1] = p.exact.holes.length;
+    }
+    hull++;
+  }
+  return X;
+}
 
 /**
  * How deep a shape floats upright: the height above its lowest point (box[0][1]) of the level

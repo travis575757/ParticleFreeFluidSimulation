@@ -21,6 +21,7 @@
 // one cell from its neighbours: inside a brick the GPU's own filtering then gives a continuous
 // trilinear density from two fetches.
 import { header, prims, TERRAIN, FAR as FAR_FIELD, SWELL, BRICK, MAX_PRIMS, MAX_WATER } from '../shaders/common.js';
+import { exactUniforms } from './hull.js';
 
 export { Camera } from '../render3d.js';
 
@@ -96,7 +97,7 @@ uniform float uTerMax;        // highest point of the ground
 ${TERRAIN}
 ${FAR_FIELD}
 ${SWELL}
-${prims('S', true)}
+${prims('S', true, true)}
 uniform float uKind[${MAX_PRIMS}];    // per primitive: 0 fixed obstacle, 1 scripted body, 2..5 rigid body colours, 6 rock (as the ground where it is steep), 7 hull
 const float FAR = 20000.0;
 
@@ -511,14 +512,31 @@ float traceTerrain(vec3 ro, vec3 rd, float tmax) {
   }
   return -1.0;
 }
+// the primitive idx, if it is a hull that is drawn from its drawing (else -1)
+int drawnHull(float idx) {
+  for (int i = 0; i < ${MAX_PRIMS}; i++) {
+    if (i >= uSN) break;
+    if (float(i) != idx) continue;
+    float w = abs(uSA[i].w);
+    if (w > 2.5 && w < 3.5 && uSXN[int(uSB[i].w + 0.5)].x > 0) return i;
+  }
+  return -1;
+}
 float traceSolid(vec3 ro, vec3 rd, float tmax, out float idx) {
   idx = -1.0;
   if (uSN == 0) return -1.0;
-  float t = 0.0;
+  float t = 0.0, tp = 0.0, dp = -1.0;
   for (int i = 0; i < 80; i++) {
     vec2 s = sdS(ro + rd * t);
     if (s.x < 0.02) { idx = s.y; return t; }
-    t += max(s.x, 0.02);
+    float st = max(s.x, 0.02);
+    // Two samples in a row that come down on a face: the line through them meets it. (No further
+    // than two and a half times the distance: past an edge it is not a line. A hull drawn from
+    // its drawing is the reason: there every sample counts, see exactCode in src/shaders/common.js.)
+    if (dp > s.x && s.x < 0.6) st = min(s.x * (t - tp) / (dp - s.x), 2.5 * s.x);
+    tp = t;
+    dp = s.x;
+    t += st;
     if (t > tmax) break;
   }
   return -1.0;
@@ -527,7 +545,8 @@ float traceSolid(vec3 ro, vec3 rd, float tmax, out float idx) {
 vec2 traceOpaque(vec3 ro, vec3 rd) {
   float idx;
   float tS = traceSolid(ro, rd, FAR, idx);
-  float tT = traceTerrain(ro, rd, tS > 0.0 ? tS : FAR);
+  // (0: the ray starts on a solid, as one does that goes on from the liquid that lies against it)
+  float tT = traceTerrain(ro, rd, tS >= 0.0 ? tS : FAR);
   if (tT >= 0.0) return vec2(tT, -1.0);
   return vec2(tS, idx);
 }`;
@@ -755,10 +774,19 @@ vec3 shadeOpaque(vec3 p, float idx, float t) {
     // wet ground is darker
     if (uDetail > 0.5) base *= 1.0 - 0.36 * wetGround(p, h.yz);
   } else {
-    const float e = 0.05;
-    n = normalize(vec3(sdS(p + vec3(e, 0.0, 0.0)).x - sdS(p - vec3(e, 0.0, 0.0)).x,
-                       sdS(p + vec3(0.0, e, 0.0)).x - sdS(p - vec3(0.0, e, 0.0)).x,
-                       sdS(p + vec3(0.0, 0.0, e)).x - sdS(p - vec3(0.0, 0.0, e)).x));
+    // a hull that is drawn from its drawing has its normal from there
+    int at = drawnHull(idx);
+    for (int i = 0; i < ${MAX_PRIMS}; i++) {
+      if (i != at) continue;
+      n = sdSExactN(int(uSB[i].w + 0.5), uSR[i] * (p - uSA[i].xyz)) * uSR[i];
+      if (uSA[i].w < 0.0) n = -n;
+    }
+    if (at < 0) {
+      const float e = 0.05;
+      n = normalize(vec3(sdS(p + vec3(e, 0.0, 0.0)).x - sdS(p - vec3(e, 0.0, 0.0)).x,
+                         sdS(p + vec3(0.0, e, 0.0)).x - sdS(p - vec3(0.0, e, 0.0)).x,
+                         sdS(p + vec3(0.0, 0.0, e)).x - sdS(p - vec3(0.0, 0.0, e)).x));
+    }
     float kind = uKind[int(idx)];
     base = kind < 0.5 ? vec3(0.50, 0.44, 0.40)
       : kind < 1.5 ? vec3(0.62, 0.20, 0.14)
@@ -817,8 +845,9 @@ void main() {
     // into the liquid: how far the refracted ray travels in it, and what it lands on
     vec3 rr = refract(rd, n, 1.0 / IOR);
     rr = normalize(rr + vec3(equal(rr, vec3(0.0))) * 1.0e-6);
+    // (0: the surface was met at, or just inside, what the liquid lies against)
     vec2 op2 = traceOpaque(ph, rr);
-    float tEnd2 = op2.x > 0.0 ? op2.x : 400.0;
+    float tEnd2 = op2.x >= 0.0 ? op2.x : 400.0;
     float te = crossing(ph, rr, 0.05, tEnd2, true, 0.0, none, noLines);
     // (liquid that ends within two cells of what the ray lands on reaches it: in the cells the
     // ground cuts the density is below the threshold, and where bricks that are stored lie next
@@ -832,7 +861,7 @@ void main() {
       vec2 sf = hfSurf(pe.xz, false);
       if (sf.y > 0.0 && pe.y < sf.x + 12.0) thick = tEnd2;
     }
-    vec3 behind = op2.x > 0.0 ? shadeOpaque(ph + rr * op2.x, op2.y, tw + op2.x) : sky(rr);
+    vec3 behind = op2.x >= 0.0 ? shadeOpaque(ph + rr * op2.x, op2.y, tw + op2.x) : sky(rr);
     vec3 trans = exp(-vec3(0.075, 0.020, 0.010) * thick);
     float body = 1.0 - exp(-thick * 0.035);
     col += (1.0 - F) * trans * mix(behind, vec3(0.03, 0.30, 0.52), body * 0.75);
@@ -878,7 +907,11 @@ void main() {
     kinds.set(world.solidKinds());
     const grp = sim.hf ? sim.hfGroups() : null;
     const sea = world.sea ? world.sea() : null;
+    // the hulls as they were drawn (o.exact = false: as the lattices the solver has them on)
+    const solids = world.solidPrims();
+    const X = (this._exact = exactUniforms(solids, 'S', this._exact, o.exact !== false));
     return {
+      ...X,
       uHfSea: sea ? [sea.level, sea.amp, sea.k, sea.phase] : [0, 0, 0, 0],
       uHfSeaDir: sea ? [sea.dir[0], sea.dir[1], sea.origin[0] * sea.dir[0] + sea.origin[1] * sea.dir[1], 1] : [0, 0, 0, 0],
       ...sim._U(L0), ...sim._solidUniforms(), ...(sim.swell && o.swell !== false ? sim.swell.uniforms : this.noSwell),
@@ -886,7 +919,7 @@ void main() {
       uVol: this.vol, uVolInv: [1 / this.vol.w, 1 / this.vol.h], uVolRow: this.perRow,
       uS1: sim.R.s[1], uS2: sim.R.s[2],
       uTerMax: world.terrain ? world.terrain.max : 0,
-      ...sim._prims(world.solidPrims(), 'S'),
+      ...sim._prims(solids, 'S'),
       uKind: kinds,
       _rows: rows,
     };

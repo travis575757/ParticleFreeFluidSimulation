@@ -563,14 +563,103 @@ float sd${P}Hull(vec3 p, vec4 B, int ch) {
 `;
 }
 
-export function prims(P, hulls = false) {
+// A hull as it was drawn, for the eye (src/world/hull.js, flattenShape): the lattice rounds
+// every edge by a third of a cell and ribs a wall that runs across it. The drawing is an
+// intersection of boxes and half spaces, without the intersections that are its hollows and
+// without the holes made since, all in the frame of the body.
+export const MAX_EXACT = 24;      // boxes and half spaces in the drawing of one hull
+export const MAX_HOLES = 8;
+export const EXACT_BAND = 0.6;    // the drawing is evaluated where the lattice gives less than this (cells)
+function exactCode(P) {
+  return `
+uniform ivec2 u${P}XN[${MAX_HULLS}];                 // boxes and half spaces, holes (none of the first: the lattice is all there is)
+uniform vec4 u${P}XA[${MAX_HULLS * MAX_EXACT}];      // box: centre, rounding of its corners; half space: a point of its plane, -1
+uniform vec4 u${P}XB[${MAX_HULLS * MAX_EXACT}];      // box: half extents; half space: normal; w: added to the distance
+uniform int u${P}XG[${MAX_HULLS * MAX_EXACT}];       // 0: part of the body, k > 0: part of hollow k (in this order)
+uniform vec4 u${P}XH[${MAX_HULLS * MAX_HOLES}];      // holes: centre, radius
+// d: what the lattice gives at p
+float sd${P}Exact(int h, vec3 p, float d) {
+  ivec2 n = u${P}XN[h];
+  if (n.x == 0) return d;
+  // (away from the surface the lattice will do: it is never more than 0.35 cells over)
+  if (d > ${EXACT_BAND.toFixed(1)}) return d - 0.35;
+  float res = -BIG, cur = -BIG;
+  int g = 0;
+  for (int i = 0; i < ${MAX_EXACT}; i++) {
+    if (i >= n.x) break;
+    int k = h * ${MAX_EXACT} + i;
+    int gi = u${P}XG[k];
+    if (gi != g) { res = g == 0 ? cur : max(res, -cur); cur = -BIG; g = gi; }
+    // (a hollow that is already further off than what there is takes nothing away: the rest of it can wait)
+    else if (g > 0 && -cur <= res) continue;
+    vec4 A = u${P}XA[k], B = u${P}XB[k];
+    float e;
+    if (A.w < 0.0) e = dot(p - A.xyz, B.xyz);
+    else {
+      vec3 q = abs(p - A.xyz) - B.xyz + A.w;
+      e = length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - A.w;
+    }
+    cur = max(cur, e + B.w);
+  }
+  res = g == 0 ? cur : max(res, -cur);
+  for (int j = 0; j < ${MAX_HOLES}; j++) {
+    if (j >= n.y) break;
+    vec4 H = u${P}XH[h * ${MAX_HOLES} + j];
+    res = max(res, H.w - length(p - H.xyz));
+  }
+  return res;
+}
+// The normal of the drawing at p (frame of the body): the gradient of the part sd${P}Exact() has
+// its value from. (One evaluation; six of the distance around p cost a third of a frame.)
+vec3 sd${P}ExactN(int h, vec3 p) {
+  ivec2 n = u${P}XN[h];
+  float res = -BIG, cur = -BIG;
+  vec3 gRes = vec3(0.0, 1.0, 0.0), gCur = gRes;
+  int g = 0;
+  for (int i = 0; i < ${MAX_EXACT}; i++) {
+    if (i >= n.x) break;
+    int k = h * ${MAX_EXACT} + i;
+    int gi = u${P}XG[k];
+    if (gi != g) {
+      if (g == 0) { res = cur; gRes = gCur; } else if (-cur > res) { res = -cur; gRes = -gCur; }
+      cur = -BIG;
+      g = gi;
+    }
+    vec4 A = u${P}XA[k], B = u${P}XB[k];
+    float e;
+    vec3 ge;
+    if (A.w < 0.0) { e = dot(p - A.xyz, B.xyz); ge = B.xyz; }
+    else {
+      vec3 r = p - A.xyz, q = abs(r) - B.xyz + A.w;
+      float m = max(q.x, max(q.y, q.z));
+      e = length(max(q, 0.0)) + min(m, 0.0) - A.w;
+      // (outside: away from the nearest point of the box; inside: out through its nearest face)
+      ge = normalize(m > 0.0 ? max(q, 0.0) : vec3(equal(q, vec3(m)))) * mix(vec3(-1.0), vec3(1.0), step(0.0, r));
+    }
+    if (e + B.w > cur) { cur = e + B.w; gCur = ge; }
+  }
+  if (g == 0) { res = cur; gRes = gCur; } else if (-cur > res) { res = -cur; gRes = -gCur; }
+  for (int j = 0; j < ${MAX_HOLES}; j++) {
+    if (j >= n.y) break;
+    vec4 H = u${P}XH[h * ${MAX_HOLES} + j];
+    vec3 r = p - H.xyz;
+    float e = H.w - length(r);
+    if (e > res) { res = e; gRes = -normalize(r); }
+  }
+  return gRes;
+}
+`;
+}
+
+// exact (with hulls, 3D): the material of a hull is its drawing where there is one (exactCode)
+export function prims(P, hulls = false, exact = false) {
   return `
 uniform int u${P}N;
 uniform vec4 u${P}A[${MAX_PRIMS}];
 uniform vec4 u${P}B[${MAX_PRIMS}];
 uniform mat3 u${P}R[${MAX_PRIMS}];
 uniform vec3 u${P}V[${MAX_PRIMS}];
-uniform vec3 u${P}W[${MAX_PRIMS}];${hulls ? hullCode(P) : ''}
+uniform vec3 u${P}W[${MAX_PRIMS}];${hulls ? hullCode(P) : ''}${hulls && exact ? exactCode(P) : ''}
 float sd${P}Prim(int i, vec3 x) {
   vec4 A = u${P}A[i];
   vec4 B = u${P}B[i];
@@ -582,7 +671,8 @@ float sd${P}Prim(int i, vec3 x) {
   if (abs(A.w) < 1.5) {
     d = length(p) - B.x;${hulls ? `
   } else if (abs(A.w) > 2.5) {
-    d = sd${P}Hull(p, B, abs(A.w) > 3.5 ? 1 : 0);` : ''}
+    d = sd${P}Hull(p, B, abs(A.w) > 3.5 ? 1 : 0);${exact ? `
+    if (abs(A.w) < 3.5) d = sd${P}Exact(int(B.w + 0.5), p, d);` : ''}` : ''}
   } else {
     vec3 q = abs(p) - B.xyz + B.w;
 #if DIM == 2

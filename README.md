@@ -993,6 +993,24 @@ holes that appear while it runs.
   (up to two hulls), interpolated between the samples; beyond the lattice the distance is a
   lower bound. A flat face is exact wherever it lies (to 3e-8 cells), edges and corners are
   rounded off by 0.3 cells.
+* That lattice is the solver's. Drawn, it showed: every edge rounded, and ribs along a wall
+  that runs across the lattice, as the sides of the bow do. The renderer takes the drawing
+  itself instead (`flattenShape` in `src/world/hull.js`): the boxes and half spaces whose
+  intersection is the body, those whose intersections are its hollows, and the balls cut
+  out since, 15 parts for the ship. A ray goes by the lattice (less 0.35 cells: the lattice
+  is never more than 0.26 over) until that gives less than 0.6 cells, and by the drawing
+  from there; the normal is the gradient of the part that is met. A drawing that is not
+  made of these (a function written by hand) is drawn from its lattice as before, and so
+  is every hull with `?lattice`. `tests/hull.html?case=mass&dim=3` compares the parts with
+  the drawing (to 4e-15 cells, whole and with two holes) and the shader with the parts (to
+  4e-6). It costs 0.2 ms a frame where a hull fills a good part of the picture (the ship at
+  788 × 600: 1.16 → 1.38 ms), 0.03 ms in the scenes with other bodies, nothing without.
+  (What cost at first was not the march but the normal: six evaluations of the drawing
+  around the point, 0.4 ms. And the tracer now takes the line through two samples that
+  come down on a face, which meets it in one step more.)
+* The same change took a line of stray pixels off every waterline: a ray that goes on from
+  the liquid's surface starts on, or just inside, the solid the liquid lies against, and
+  a hit at distance zero was read as none, so those pixels showed the sea bed far below.
 * Mass, centre of mass and inertia are sums over samples half a cell apart, each counted
   by how much of it is inside, plus point masses for ballast. For a hollow rectangle
   and a hollow box they are the formulas' to five digits.

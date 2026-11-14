@@ -18,10 +18,11 @@
 //   ?case=ship    3D: scenario 12 of the app with its two holes sooner, against the same hydrostatics
 //   &dim=2|3  &wall=cells  &steps=  &p.<solver param>=
 import { GLContext } from '../src/gl.js';
-import { makeGrid } from '../src/sim.js';
+import { makeGrid, packPrims } from '../src/sim.js';
 import { World } from '../src/world/world.js';
-import { Hull, sdBox, sdCut } from '../src/world/hull.js';
-import { WORLD_SCENES } from '../src/world/scenes.js';
+import { Hull, sdBox, sdCut, drawingSd, exactUniforms } from '../src/world/hull.js';
+import { WORLD_SCENES, shipShape, shipBody } from '../src/world/scenes.js';
+import { header, prims, MAX_HULLS, EXACT_BAND } from '../src/shaders/common.js';
 import { quatFromAxisAngle } from '../src/bodies.js';
 
 const q = new URLSearchParams(location.search);
@@ -179,6 +180,69 @@ try {
     // points on the outside lie on the outside
     const far = Math.max(...hull.samplePoints().map((p) => Math.abs(hull.shellSd(p))));
     check(far < 0.25, `its contact points lie on its outside (${far.toFixed(3)} cells off at most)`);
+    if (dim === 3) {
+      // The renderer draws a hull from its drawing, not from the lattice (exactCode in
+      // src/shaders/common.js): the ship of the app, whole and with two holes in her.
+      const ship = shipShape(3);
+      const body = new Hull(glc, 3, { ...shipBody(3, ship, { draught: 10 }), pos: [0, 0, 0] });
+      check(!!body.drawing && !!hull.drawing, `a drawing made of boxes, half spaces, intersections and cuts is handed on as it is (the ship: ${body.drawing ? body.drawing.length : 0} parts in ${body.drawing ? 1 + Math.max(...body.drawing.map((q) => q.group)) : 0} groups)`);
+      check(new Hull(glc, 3, { sd: (x, y, z) => ship.sd(x, y, z), shell: ship.shell, box: ship.box, pos: [0, 0, 0] }).drawing === null, 'a function written by hand is not: it is drawn from the lattice');
+      const [lo, hi] = ship.box;
+      const pt = (i) => [0, 1, 2].map((d) => lo[d] - 2 + (rnd(i, [12.9898, 78.233, 39.425][d]) * 0.5 + 0.5) * (hi[d] - lo[d] + 4));
+      const worstJs = (holes) => {
+        let w = 0;
+        for (let i = 0; i < 20000; i++) {
+          const p = pt(i);
+          let want = ship.sd(p[0], p[1], p[2]);
+          for (const h of holes) want = Math.max(want, h[3] - Math.hypot(p[0] - body.com[0] - h[0], p[1] - body.com[1] - h[1], p[2] - body.com[2] - h[2]));
+          w = Math.max(w, Math.abs(drawingSd(body.drawing, holes, p.map((v, d) => v - body.com[d])) - want));
+        }
+        return w;
+      };
+      const whole = worstJs([]);
+      check(whole < 1e-9, `the parts give the distance of the drawing (20000 points: ${whole.toExponential(1)} off at most)`);
+      body.breach(body.fromDrawing([22, -ship.b + 2, ship.c - 1]), 2.5);
+      body.breach(body.fromDrawing([0, -ship.b + 2, ship.c - 1]), 3);
+      const holed = worstJs(body.holeList);
+      check(body.holeList.length === 2 && holed < 1e-9, `... and with two holes cut, that of the drawing without two balls (${holed.toExponential(1)})`);
+      // the same from the shader, on three slices through her, turned and off the origin
+      const Pg = glc.program('exactTest', `${header(3, glc.floatLinear)}
+${prims('X', true, true)}
+uniform vec4 uSlice;     // x and y of the first sample, the step between samples, z
+out vec4 o;
+void main() {
+  vec3 p = vec3(uSlice.xy + (gl_FragCoord.xy - 0.5) * uSlice.z, uSlice.w);
+  o = vec4(sdX(p).x, 0.0, 0.0, 1.0);
+}`);
+      body.pos = [7.3, -2.1, 4.6];
+      body.quat = quatFromAxisAngle([0.3, 0.9, 0.2], 0.7);
+      const none = glc.texture(1, 1, 'rg32f');
+      const U = packPrims([body.prim()], 'X', 3);
+      for (let h = 0; h < MAX_HULLS; h++) U[`uXH${h}`] ??= none;
+      const N = 96, step = 0.83, T = glc.texture(N, N, 'rgba32f');
+      const run = (draw) => {
+        let w = 0, near = 0, n = 0, apart = 0;
+        for (const z of [-6.2, 1.4, 9.7]) {
+          glc.draw(Pg, T, { ...U, ...exactUniforms([body.prim()], 'X', null, draw), uSlice: [body.pos[0] - 0.5 * N * step, body.pos[1] - 0.5 * N * step, step, body.pos[2] + z] });
+          const got = glc.read(T);
+          for (let j = 0; j < N; j++) {
+            for (let i = 0; i < N; i++) {
+              const l = body.toLocal([body.pos[0] + (i - 0.5 * N) * step, body.pos[1] + (j - 0.5 * N) * step, body.pos[2] + z]);
+              const lat = body.sample(l, 0), want = drawingSd(body.drawing, body.holeList, l), d = got[4 * (j * N + i)];
+              // (further out the shader gives a bound: the lattice less 0.35 cells)
+              if (lat > EXACT_BAND) { near = Math.max(near, d - want); apart = Math.max(apart, lat - want); continue; }
+              w = Math.max(w, Math.abs(d - (draw ? want : lat)));
+              n++;
+            }
+          }
+        }
+        return { w, near, n, apart };
+      };
+      const ex = run(true), la = run(false);
+      check(ex.w < 2e-4, `the shader gives the same where the lattice gives less than ${EXACT_BAND} cells (${ex.n} samples: ${ex.w.toExponential(1)} off at most)`);
+      check(ex.apart < 0.35 && ex.near < 1e-4, `... and no more than the drawing further out, where it goes by the lattice less 0.35 cells (the lattice is ${ex.apart.toFixed(3)} cells over at most, the shader ${ex.near.toExponential(1)})`);
+      check(la.w < 2e-4, `switched off, it gives the lattice (${la.w.toExponential(1)})`);
+    }
   } else if (kind === 'dry' || kind === 'speed') {
     const W = dim === 2 ? 208 : 128, level = 40, a = dim === 2 ? 30 : 22, b = 12, c = 12;
     // (driven, the box has a lid: what gets in then came through a wall, not over the rim)

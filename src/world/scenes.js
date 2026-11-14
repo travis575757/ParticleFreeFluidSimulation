@@ -1,5 +1,5 @@
 // World scenes: ground, liquid, sources and drains in cells; x and z horizontal, y up.
-import { sdBox, sdCut, sdIntersect, sdPlane, integrateShape, floatDraught } from './hull.js';
+import { sdBox, sdCut, sdIntersect, sdPlane, sdInset, integrateShape, floatDraught } from './hull.js';
 
 const clamp = (x, a, b) => Math.min(Math.max(x, a), b);
 const ss = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
@@ -491,7 +491,7 @@ export function shipShape(dim, o = {}) {
   const outer = sdIntersect(sdBox(3, [0, 0, 0], [a, b, c], 2), ...taper);
   // (the same with the top far above: what is cut out of the hull stays open upwards)
   const tall = sdIntersect(sdBox(3, [0, 20, 0], [a, b + 20, c], 2), ...taper);
-  const inner = (x, y, z) => tall(x, y, z) + wall;
+  const inner = sdInset(tall, wall);
   const long = (2 * (a - wall) - (n - 1) * wall) / n;
   const comps = Array.from({ length: n }, (_, k) => [-a + wall + k * (long + wall), -a + wall + k * (long + wall) + long]);
   const cavity = ([x0, x1]) => sdIntersect(inner, sdBox(3, [(x0 + x1) / 2, 20, 0], [(x1 - x0) / 2, 60, c + 8]));
