@@ -27,6 +27,7 @@ const state = {
   mist: !q.has('nomist'),
   swell: !q.has('noswell'),
   detail: !q.has('nodetail'),
+  foam: !q.has('nofoam'),
   exact: !q.has('lattice'),   // hulls as they were drawn (off: as the lattice the solver has them on)
   focus: !q.has('nofocus'),   // with a height field: solve its water in 3D around what the camera looks at
   tiers: !q.has('notiers'),   // ... and show the map of who has the water
@@ -234,6 +235,8 @@ function buildPanel() {
     'Density below the surface threshold of 0.5 (sheets and drops thinner than a cell) drawn as a white haze.');
   P.checkbox('detail', 'Ripples, sun glitter, wet shores', state.detail, (v) => { state.detail = v; },
     'Drawn on top of what is solved, for the eye only: ripples smaller than a cell, the sun on them, and the ground darker where it is wet. Off: the water and the ground as the solver has them.');
+  P.checkbox('foam', 'Foam', state.foam, (v) => { state.foam = v; },
+    'White on the water where it breaks: under a fall, in rapids, on a wave that goes over, around a splash. It is made, carried along and fades on a map of its own, for the eye only; the solver knows nothing of it.');
   P.checkbox('swell', 'Show the waves beyond the solved water', state.swell, (v) => { state.swell = v; },
     'Where the water of a sea is not solved, a map of its surface carries the waves on. Off: the sea is drawn flat there, which is all the solver itself knows of it.');
   P.checkbox('focus', 'Solve in 3D around the view target', state.focus, (v) => { state.focus = v; },
@@ -389,7 +392,7 @@ function tick() {
       applyPointer();
     }
     const showBrush = pointer.pos && state.tool !== 'orbit' && (pointer.inside || pointer.down);
-    renderer.render(world, camera, { overlay: state.overlay, mist: state.mist, swell: state.swell, detail: state.detail, exact: state.exact, cursor: showBrush ? [...pointer.pos, state.tool === 'hole' ? holeRadius() : state.brush] : null });
+    renderer.render(world, camera, { overlay: state.overlay, mist: state.mist, swell: state.swell, detail: state.detail, foam: state.foam, exact: state.exact, cursor: showBrush ? [...pointer.pos, state.tool === 'hole' ? holeRadius() : state.brush] : null });
     if (frame % 6 === 0) {
       // the totals of the sources and drains follow the same report the storage counters come from
       if (glc.readback !== 'scrambled') {

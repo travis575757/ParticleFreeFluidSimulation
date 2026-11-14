@@ -191,7 +191,8 @@ apps with synthetic mouse input (`2d|3d|world`). Both tools take
 `--browser chrome|firefox|librewolf`; `npm test` runs the interaction checks in Chrome,
 `npm run test:firefox` and `npm run test:librewolf` in the other two. The pages for world mode
 (`golden.html`, `sparse.html`, `world.html`, `held.html`, `sea.html`, `swell.html`,
-`heightfield.html`, `handover.html`, `hull.html`) are described [there](#world-mode).
+`heightfield.html`, `handover.html`, `hull.html`, `foam.html`) are described
+[there](#world-mode).
 
 ## Where the paper leaves a choice open
 
@@ -525,6 +526,36 @@ glitter, wet shores" in the panel, `?nodetail` in the address):
 The solver knows nothing of any of it. A frame costs 0.02 to 0.04 ms more to draw at 788 ×
 600 (the ship 1.11 → 1.14 ms), and 0.15 ms more in the surf scene (2.04 → 2.19 ms), where
 most of the picture is water over a beach.
+
+**Foam** (`src/world/foam.js`, `src/shaders/foam.js`; "Foam" in the panel, `?nofoam` in the
+address). White on the water where it breaks, for the eye only as well. It is one number per
+texel of the map a scene has anyway, stepped in one pass after the solver:
+
+* *Over a height field* foam is made where the flow runs together faster than a wave would
+  even it out (the foot of a fall, a jump, a front that has gone over), where a steep face
+  moves (a bore, the lip of a fall), and a little where the water shoots several times
+  faster than its waves. It is carried along with the water. The columns that are solved in
+  3D are on that map too, as sums over their cells, so a breaker makes foam whichever of
+  the two solvers has it.
+* *Over a sea* it is made where the solved surface rises or falls faster than 4 cells a
+  second, or stands steeper than 1 in 3: round a splash, behind a boat. It stays where it
+  was made.
+
+It fades to a third in 3.5 s. The renderer draws a little of it as flecks and more of it as
+flecks grown together, in a pattern that goes with the water. The waterfall and the cascade
+have neither map and no foam: the white there is the haze of their thin sheets, as before.
+`tests/foam.html`: a lake at rest over rough ground makes none; foam in a stream goes along
+with it (1 % off); a bore has it at its front and the still water before and behind it has
+none; a ball dropped into the sea leaves foam where it fell and none beyond the solved
+water; and with foam and without, the densities of the solver (and the depths of the height
+field, in the dam scene) agree to the bit.
+
+It is a map and not particles, so its cost does not grow with how much water breaks: one
+pass more in a step, over the texels of the map. With foam switched off and on in the same
+tree, in turn, the fastest of two or three runs: buoys 10.6 → 11.3 ms a step, harbour 10.9
+→ 10.9, surf 13.1 → 12.8, dam 22.1 → 22.4, river 28.7 → 28.4, which is nothing these runs
+can tell from the 5 % by which the machine's other work moved them. A frame at 788 × 600
+takes what it took: 0.82 ms in the harbour before and after, 0.67 and 0.68 with the buoys.
 
 **Measured** (Chrome 154, RTX 3090)
 
@@ -1306,7 +1337,7 @@ world3d.html, world2d.html     the World app, and the same in section
 src/gl.js                      WebGL2 helpers (programs, float targets, scatter, async readback)
 src/sim.js                     FluidSim: textures, hierarchy, the time step
 src/shaders/                   GLSL for every pass (sparse.js: brick bookkeeping passes; heightfield.js,
-                               hfcouple.js: the map and its hand-overs)
+                               hfcouple.js: the map and its hand-overs; foam.js)
 src/runner.js                  scene driver: obstacles, bodies, emitters, interaction verbs
 src/bodies.js                  rigid bodies and contacts
 src/couple.js                  bodies and liquid solved together (Newton on the bodies' velocities)
@@ -1314,9 +1345,9 @@ src/render2d.js, render3d.js   renderers
 src/scenes2d.js, scenes3d.js   scenarios
 src/world/                     world mode: bricks.js (page table), sparsesim.js (solver on bricks),
                                water.js (water at rest), swell.js (waves beyond the solved water),
-                               heightfield.js (shallow water on a map), hull.js (bodies with a shape
-                               of their own), terrain.js, world.js, scenes.js, render3d.js,
-                               render2d.js, app3d.js, app2d.js
+                               heightfield.js (shallow water on a map), foam.js (white where the
+                               water breaks), hull.js (bodies with a shape of their own), terrain.js,
+                               world.js, scenes.js, render3d.js, render2d.js, app3d.js, app2d.js
 tests/, tools/                 headless diagnostics and interaction checks (puppeteer-core)
 docs/screenshots/              the pictures above (tools/screenshots.mjs regenerates them)
 ```

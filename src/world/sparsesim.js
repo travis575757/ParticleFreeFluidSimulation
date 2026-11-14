@@ -17,6 +17,7 @@ import { sparseShaders } from '../shaders/sparse.js';
 import { hfCoupleShaders } from '../shaders/hfcouple.js';
 import { BrickSet } from './bricks.js';
 import { Swell } from './swell.js';
+import { Foam } from './foam.js';
 
 export const SPARSE_PARAMS = {
   // Two options of FluidSim that are off there (the dense solver is the reference) and on here: with
@@ -68,6 +69,8 @@ export const SPARSE_PARAMS = {
                      // to it, as on the finest (0: coupled through the averaged face weights, as it was at first)
   swell: 1,          // 3D, with bodies of water: a map of the surface carries the waves on over the water that is
                      // not solved (src/world/swell.js)
+  foam: 1,           // 3D, with a height field or that map: foam where the water breaks, for the eye only
+                     // (src/world/foam.js)
   // over a height field (setHeightField)
   heldLive: -1,      // the faces between solved and held liquid keep their velocity (1) or let waves out (0: see
                      // "project" in shaders/sim.js); -1: the first over a height field, the second without one
@@ -175,6 +178,14 @@ export class SparseSim extends FluidSim {
     this._waterU = null;
     if (this.swell) { this.swell.dispose(); this.swell = null; }
     if (this.dim === 3 && bodies.length && this.params.swell && !this.hf) this.swell = new Swell(this, swell);
+    this._setFoam();
+  }
+
+  /** The foam goes on the map there is: the height field, or else the map of waves. */
+  _setFoam() {
+    if (this.foam) { this.foam.dispose(); this.foam = null; }
+    const on = this.hf || this.swell;
+    if (this.dim === 3 && this.params.foam && on) this.foam = new Foam(this, on);
   }
 
   /** Is there water that is not solved: bodies of water at rest, or a height field? */
@@ -239,6 +250,8 @@ export class SparseSim extends FluidSim {
     this.hfc = null;
     this.hfWater = null;
     this.hfFocus = null;              // [x, z] of what the camera looks at (cells), or null: see _hfPromote
+    if (this.swell && hf) { this.swell.dispose(); this.swell = null; }
+    this._setFoam();
     if (!hf) return;
     const { B, dim } = this;
     if (B % hf.cell) throw new Error(`a brick (${B} cells) is no whole number of texels of the height field (${hf.cell} cells)`);
@@ -282,7 +295,6 @@ export class SparseSim extends FluidSim {
     glc.clear(this.hfc.C[0]);
     glc.clear(this.hfc.C[1]);
     glc.clear(this.hfc.C1);
-    if (this.swell) { this.swell.dispose(); this.swell = null; }
     this.hfLock();
   }
 
@@ -1045,6 +1057,7 @@ export class SparseSim extends FluidSim {
     this.freedMass = 0;               // density (traces below wetMin, mist that hovered) in the bricks that were dropped
     this.water = [];
     this.swell = null;
+    this.foam = null;
     this.hf = null;                   // the height field (setHeightField) ...
     this.hfc = null;                  // ... and what ties it to the bricks
     this._newHeld = [];               // slots held since the last _syncBricks
@@ -1375,6 +1388,7 @@ export class SparseSim extends FluidSim {
     this._lastRest = null;
     this.displaced = 0;
     if (this.swell) this.swell.reset();
+    if (this.foam) this.foam.reset();
     this.wokenAt.clear();
     this.reports = [];
     this._unbooked = [];
@@ -1521,6 +1535,7 @@ export class SparseSim extends FluidSim {
     this._syncBricks();
     super.step();
     if (this.swell) this.swell.step();
+    if (this.foam) this.foam.step();
     if (this.hf && this.frame % this.params.hfLook === 0) this._hfLook();
     if (this.params.lifecycle && this.frame % this.params.reportEvery === 0) this.makeReport();
   }
@@ -1937,7 +1952,7 @@ export class SparseSim extends FluidSim {
     super.dispose();
     const glc = this.glc;
     for (const L of this.levels) L.set.dispose();
-    if (this.swell) this.swell.dispose();
+    if (this.swell) { this.swell.dispose(); this.swell = null; }
     this.setHeightField(null);
     for (const t of [...this.R.s, ...this.R.f, this.R.d, ...this._resolved.values(), this._noTerrain, this.ledger, ...this.M]) glc.deleteTexture(t);
     this.heldList.dispose();

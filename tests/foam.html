@@ -1,0 +1,212 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>foam (src/world/foam.js)</title>
+<canvas id="c" width="64" height="64"></canvas>
+<script type="module">
+// Foam is drawn, not solved: a number per texel of the map a scene has.
+// Over a height field on its own:
+//   a lake at rest over rough ground with dry shores makes none
+//   foam in a steady stream goes along with it, and a third of it is left after `life` seconds
+//   a bore makes it where it runs, and none in the still water before and behind it
+// over a sea into which a ball of water falls:
+//   the solver is the same to the bit with and without it
+//   there is foam where the ball fell, and none beyond the solved water
+//   with the map of waves switched off it fades, and then no pass is drawn for it
+// and in a scene with a height field and 3D water (the dam): the solver is the same to the bit,
+// and the flood makes foam.
+//   ?time=1 (ms per step of the foam on maps of three sizes)
+import { GLContext } from '../src/gl.js';
+import { World } from '../src/world/world.js';
+import { HeightField } from '../src/world/heightfield.js';
+import { Foam, FOAM_PARAMS } from '../src/world/foam.js';
+import { WORLD_SCENES } from '../src/world/scenes.js';
+
+const q = new URLSearchParams(location.search);
+const log = (s) => console.log(s);
+let failed = 0;
+const check = (ok, what) => { if (!ok) failed++; log(`${ok ? 'PASS' : 'FAIL'}  ${what}`); };
+const pause = () => new Promise((r) => requestAnimationFrame(r));
+
+try {
+  if (document.readyState !== 'complete') await new Promise((r) => window.addEventListener('load', r));
+  const glc = new GLContext(document.getElementById('c'));
+  log(`readback ${glc.readback} | ${glc.renderer}`);
+  const g = 10 / 0.05, dt = 1 / 60, life = FOAM_PARAMS.life;
+  // (what LibreWolf reads back is noisy in its last bits: a zero is not exactly zero)
+  const NONE = 1e-6;
+  const amount = (foam) => { const d = glc.read(foam.F[0]); const a = new Float32Array(d.length / 4); for (let i = 0; i < a.length; i++) a[i] = d[4 * i]; return a; };
+  const largest = (a) => a.reduce((m, v) => Math.max(m, v), 0);
+  const put = (foam, f) => {
+    const [nx, nz] = foam.n, d = new Float32Array(4 * nx * nz);
+    for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) d[4 * (k * nx + i)] = f(i, k);
+    glc.upload(foam.F[0], d);
+  };
+  // a height field on its own, and what the foam needs to know of a solver
+  const lone = (n, cell = 2) => {
+    const hf = new HeightField(glc, { origin: [0, 0], n, cell, gravity: g, params: { sync: 1 } });
+    const foam = new Foam({ glc, hf, params: { dt }, anchor: [0, 0, 0] }, hf);
+    return { hf, foam, dispose() { foam.dispose(); hf.dispose(); } };
+  };
+
+  // ---- a lake at rest
+  {
+    const { hf, foam, dispose } = lone([128, 96]);
+    hf.setBed((x, z) => 6 + 5 * Math.sin(x * 0.11) * Math.cos(z * 0.09) + 3 * Math.sin(x * 0.31 + z * 0.23));
+    hf.fill(8);
+    for (let i = 0; i < 240; i++) { hf.step(dt); foam.step(); }
+    const a = amount(foam), H = glc.read(hf.H[0]);
+    let wet = 0, dry = 0;
+    for (let i = 0; i < a.length; i++) if (H[4 * i] > 1e-3) wet++; else dry++;
+    check(largest(a) < NONE && wet > 1000 && dry > 1000, `a lake at rest over rough ground makes no foam (${wet} texels of water, ${dry} dry, 240 steps: at most ${largest(a).toExponential(1)})`);
+    dispose();
+  }
+
+  // ---- foam in a steady stream
+  {
+    const n = [128, 96], cell = 2, U = [14, 5];
+    const { hf, foam, dispose } = lone(n, cell);
+    hf.setBed(() => 0);
+    hf.setState(() => 6, () => U);
+    const i0 = 30, k0 = 30;
+    put(foam, (i, k) => 0.9 * Math.exp(-((i - i0) ** 2 + (k - k0) ** 2) / 18));
+    // (away from the edge of the map: a stream that ends there, as no height field's does, piles up)
+    const moment = (a) => { let s = 0, x = 0, z = 0; for (let k = 8; k < n[1] - 8; k++) for (let i = 8; i < n[0] - 8; i++) { const v = a[k * n[0] + i]; s += v; x += v * i; z += v * k; } return [s, x / s, z / s]; };
+    const m0 = moment(amount(foam));
+    const steps = Math.round(life / dt);
+    for (let i = 0; i < steps; i++) foam.step();           // (the stream stays as it is: only the foam is stepped)
+    const m1 = moment(amount(foam));
+    const t = steps * dt, want = [U[0] * t / cell, U[1] * t / cell], went = [m1[1] - m0[1], m1[2] - m0[2]];
+    const off = Math.hypot(went[0] - want[0], went[1] - want[1]) / Math.hypot(...want);
+    const kept = m1[0] / m0[0];
+    // (the filter of a texture takes its weights to 1 / 256 of a texel: the way is a few percent
+    // off. And the map holds numbers of 11 bits, cut off at every step: a little less is left)
+    check(off < 0.05 && kept < 1 / 3 + 0.003 && kept > 0.29, `foam in a stream of (${U}) cells/s goes along with it: (${went.map((v) => v.toFixed(2))}) texels in ${t.toFixed(2)} s for (${want.map((v) => v.toFixed(2))}), ${(100 * off).toFixed(1)} % off; ${kept.toFixed(4)} of it is left after ${life} s (a third, less what the map's numbers cut off)`);
+    dispose();
+  }
+
+  // ---- a bore
+  {
+    const n = [384, 16], cell = 2, x0 = 300, hL = 14, hR = 4;
+    const { hf, foam, dispose } = lone(n, cell);
+    hf.setBed(() => 0);
+    hf.setState((x) => (x < x0 ? hL : hR));
+    const steps = 90;
+    for (let i = 0; i < steps; i++) { hf.step(dt); foam.step(); }
+    const a = amount(foam), H = glc.read(hf.H[0]);
+    const row = 8, at = (i) => a[row * n[0] + i], h = (i) => H[4 * (row * n[0] + i)];
+    // where the bore stands: the steepest fall of the surface beyond the dam
+    let front = 0, steep = 0;
+    for (let i = x0 / cell; i < n[0] - 2; i++) if (h(i) - h(i + 1) > steep) { steep = h(i) - h(i + 1); front = i; }
+    let peak = 0, where = 0, before = 0, behind = 0;
+    for (let i = 0; i < n[0]; i++) {
+      if (at(i) > peak) { peak = at(i); where = i; }
+      if (i > front + 4) before = Math.max(before, at(i));
+      if (h(i) > hL - 1e-3) behind = Math.max(behind, at(i));
+    }
+    check(peak > 0.5 && Math.abs(where - front) <= 3 && before < NONE && behind < NONE,
+      `a bore (${hL} cells of water let go into ${hR}): foam ${peak.toFixed(2)} at texel ${where}, the bore stands at ${front}; in the still water before it ${before.toExponential(1)}, in that behind ${behind.toExponential(1)}`);
+    dispose();
+  }
+
+  // ---- a ball of water falls into a sea of which nothing is stored
+  {
+    const level = 24.25, T1 = Number(q.get('t1') || 200);
+    const scene = () => ({ h: 0.05, water: [{ box: [-1e6, -1e6, 1e6, 1e6], level }], liquid: [{ type: 'ball', center: [0, level + 30, 0], radius: 6, vel: [0, 0, 0] }] });
+    const world = new World(glc, 3, scene());
+    const plain = new World(glc, 3, scene(), { params: { foam: 0 } });
+    const sim = world.sim, sw = sim.swell, foam = sim.foam;
+    check(!!foam && !foam.hf && foam.on === sw && !plain.sim.foam, 'a sea has its foam on the map of waves; with foam: 0 there is none');
+    let peak = 0, wide = 0;
+    const n = foam.n[0], cell = foam.cell, mid = n / 2;
+    for (let i = 0; i < T1; i++) {
+      world.step(); plain.step();
+      if (i % 10 === 9) {
+        const a = amount(foam), E = glc.read(sw.E);
+        for (let k = 0; k < n; k++) for (let j = 0; j < n; j++) {
+          const t = k * n + j, r = Math.hypot(j - mid + 0.5, k - mid + 0.5) * cell;
+          if (E[4 * t + 3] > 0.5) wide = Math.max(wide, r);
+          if (r < 24) peak = Math.max(peak, a[t]);
+        }
+        await pause();
+      }
+    }
+    const ra = glc.read(sim.rho).slice(), rb = glc.read(plain.sim.rho);
+    let same = sim.bricks === plain.sim.bricks && ra.length === rb.length;
+    for (let i = 0; same && i < ra.length; i++) same = ra[i] === rb[i];
+    check(same, `the solver is the same with and without the foam (${sim.bricks} bricks, ${sim.nHeld} held after ${T1} steps: the densities agree to the bit)`);
+    const a = amount(foam);
+    let beyond = 0;
+    for (let k = 0; k < n; k++) for (let j = 0; j < n; j++) if (Math.hypot(j - mid + 0.5, k - mid + 0.5) * cell > wide + 2 * cell) beyond = Math.max(beyond, a[k * n + j]);
+    check(peak > 0.5 && beyond < NONE, `where the ball fell there is foam (up to ${peak.toFixed(2)} within 24 cells); beyond the solved water, which reached ${wide.toFixed(0)} cells out, ${beyond.toExponential(1)}`);
+    plain.dispose();
+    // the map switched off: what foam there is fades, and then nothing is drawn for it
+    sw.reset();
+    put(foam, () => 0.8);
+    foam.left = 4 * life;
+    for (let i = 0; i < Math.round(life / dt); i++) foam.step();
+    const third = largest(amount(foam));
+    let steps = Math.round(life / dt);
+    for (; steps < 2000 && foam.left > 0; steps++) foam.step();
+    const f0 = foam.F[0];
+    foam.step();
+    check(third < 0.8 / 3 + 0.003 && third > 0.8 * 0.29 && largest(amount(foam)) < NONE && foam.F[0] === f0 && Math.abs(steps * dt - 4 * life) < 0.1,
+      `the map switched off: ${third.toFixed(4)} of 0.8 left after ${life} s (a third, less what the map's numbers cut off), after ${(steps * dt).toFixed(1)} s it is taken away and no pass is drawn for it`);
+    world.dispose();
+  }
+
+  // ---- a scene with a height field and 3D water
+  {
+    const T = Number(q.get('t2') || 300);
+    // (the height field looks at its waves without waiting, which no two runs do alike: here it waits)
+    const scene = () => { const s = WORLD_SCENES.dam.build({ at: 0.5 }); s.heightfield.params = { ...s.heightfield.params, sync: 1 }; return s; };
+    const world = new World(glc, 3, scene());
+    const plain = new World(glc, 3, scene(), { params: { foam: 0 } });
+    const sim = world.sim, foam = sim.foam, hf = sim.hf;
+    check(!!foam && foam.hf && foam.on === hf && !sim.swell && !plain.sim.foam, 'a scene with a height field has its foam on that');
+    check(largest(amount(foam)) < NONE, 'none at the start');
+    for (let i = 0; i < T; i++) {
+      world.step(); plain.step();
+      if (world.bodies.length) { await world.forcesReady; await plain.forcesReady; }
+      if (i % 10 === 9) await pause();
+    }
+    const ra = glc.read(sim.rho).slice(), rb = glc.read(plain.sim.rho);
+    let same = sim.bricks === plain.sim.bricks && ra.length === rb.length;
+    for (let i = 0; same && i < ra.length; i++) same = ra[i] === rb[i];
+    const ha = glc.read(hf.H[0]).slice(), hb = glc.read(plain.sim.hf.H[0]);
+    let sameH = ha.length === hb.length;
+    for (let i = 0; sameH && i < ha.length; i++) sameH = ha[i] === hb[i];
+    check(same && sameH, `the dam, ${(T * dt).toFixed(1)} s: the solver and its height field are the same with and without the foam (${sim.bricks} bricks: densities and depths agree to the bit)`);
+    const a = amount(foam);
+    let white = 0, wet = 0;
+    for (let i = 0; i < a.length; i++) { if (ha[4 * i] > 1e-3) wet++; if (a[i] > 0.3) white++; }
+    const U = foam.uniforms.uFoamMap;
+    check(white > 20 && white < 0.5 * wet && Math.abs(U[0] - (hf.origin[0] + sim.anchor[0])) < 1e-9 && Math.abs(U[2] - 1 / (hf.n[0] * hf.cell)) < 1e-12,
+      `the flood makes foam: ${white} of ${wet} texels of water with more than 0.3 of it (largest ${largest(a).toFixed(2)})`);
+    plain.dispose();
+    world.dispose();
+  }
+
+  // ---- what a step costs (&time=1)
+  if (q.get('time') === '1') {
+    for (const nn of [256, 512, 1024]) {
+      const { hf, foam, dispose } = lone([nn, nn]);
+      hf.setBed(() => 0);
+      hf.setState(() => 6, () => [10, 4]);
+      put(foam, (i, k) => ((i + k) % 7) / 7);
+      for (let s = 0; s < 20; s++) foam.step();
+      glc.read(foam.F[0], 0, 0, 1, 1);
+      const t0 = performance.now();
+      for (let s = 0; s < 400; s++) foam.step();
+      glc.read(foam.F[0], 0, 0, 1, 1);
+      log(`  a step of the foam on ${nn} x ${nn} texels of a height field: ${((performance.now() - t0) / 400).toFixed(4)} ms (one pass)`);
+      dispose();
+    }
+  }
+  log(failed ? `${failed} check(s) failed` : 'all checks passed');
+} catch (e) {
+  console.log('ERROR ' + (e.stack || e));
+  window.__error = String(e);
+}
+window.__done = true;
+</script>

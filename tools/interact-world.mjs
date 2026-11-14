@@ -197,6 +197,20 @@ try {
   });
   check('crate tool drops a crate into the sea', cr.n === n0 + 1 && Math.abs(cr.y) < 6 && cr.here, `${cr.n} bodies, the new one ${cr.y.toFixed(1)} cells above the surface, its water ${cr.here ? 'stored' : 'not stored'} (bodies awake: ${cr.shown})`);
   await shot('crate');
+  // ... and its splash has left foam on the water, which the box in the panel takes out of the picture
+  const fm = await page.evaluate(() => {
+    const w = window.world, f = w.sim.foam, box = document.querySelector('#c-foam');
+    if (!f || !box) return null;
+    const d = w.sim.glc.read(f.F[0]);
+    let most = 0, white = 0;
+    for (let i = 0; i < d.length; i += 4) { most = Math.max(most, d[i]); if (d[i] > 0.1) white++; }
+    box.click();
+    const off = window.app.state.foam;
+    box.click();
+    return { most, white, off, on: window.app.state.foam };
+  });
+  check('the splash leaves foam, and the panel can hide it', !!fm && fm.most > 0.1 && fm.white > 3 && fm.off === false && fm.on === true,
+    fm ? `up to ${fm.most.toFixed(2)} on ${fm.white} texels of the map; box off: ${!fm.off ? 'hidden' : 'still shown'}, on again: ${fm.on ? 'shown' : 'hidden'}` : 'no foam map or no box');
 
   // ... and on water that is a height field: the lake of the spring scene, far from the view target.
   // The water under it is solved for as long as it moves; it comes to rest at its float line.

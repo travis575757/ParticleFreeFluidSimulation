@@ -642,6 +642,31 @@ float sparkle(vec2 xz, float foot, vec2 need) {
   float g = 0.6 * exp2(l0);
   return mix(facets(xz, g, need), facets(xz, 2.0 * g, need), lod - l0);
 }
+// ---- foam (src/world/foam.js): r = how much, gb = the velocity of the water it lies on
+uniform sampler2D uFoam;
+uniform vec4 uFoamMap;        // x, z of the corner of the map (cells), 1 / its size along x and z (0: none)
+float foamPattern(vec2 q) {
+  return 0.40 * noiseD(q * 0.21).x + 0.36 * noiseD(q * 0.6 + 7.0).x + 0.24 * noiseD(q * 1.7 + 31.0).x;
+}
+// The share of the water at xz that foam covers. A little foam is flecks, more of it grows
+// together. The pattern goes with the water: two copies, each carried along for a while and
+// then set back, one fading in as the other fades out. foot: the size of a pixel on the water
+// there (cells); where it is larger than the flecks, what they cover on the average.
+float foamCover(vec2 xz, float foot) {
+  if (uFoamMap.z <= 0.0) return 0.0;
+  vec2 uv = (xz - uFoamMap.xy) * uFoamMap.zw;
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 0.0;
+  vec3 f = texture(uFoam, uv).rgb;
+  if (f.r < 0.02) return 0.0;
+  float far = smoothstep(0.5, 2.0, foot);
+  if (far >= 1.0) return 0.85 * f.r;
+  const float T = 1.8;
+  float a = fract(uTime / T), b = fract(a + 0.5);
+  float p = mix(foamPattern(xz - f.gb * ((a - 0.5) * T)), foamPattern(xz - f.gb * ((b - 0.5) * T) + 13.7), abs(2.0 * a - 1.0));
+  float th = mix(0.80, 0.34, f.r);
+  // (thin where there is little of it)
+  return mix(smoothstep(th - 0.10, th + 0.12, p) * mix(0.6, 1.0, f.r), 0.85 * f.r, far);
+}
 // mapped: p is on water that is not solved
 vec3 liquidNormal(vec3 p, bool mapped) {
   ivec3 b = ivec3(floor(p / float(BS)));
@@ -867,6 +892,8 @@ void main() {
     col += (1.0 - F) * trans * mix(behind, vec3(0.03, 0.30, 0.52), body * 0.75);
     // deep water: what the light scattered in it sends back (nothing to speak of in a pool)
     col += (1.0 - F) * vec3(0.010, 0.065, 0.120) * (1.0 - exp(-thick * 0.012));
+    float fc = foamCover(ph.xz, foot);
+    if (fc > 0.0) col = mix(col, vec3(0.86, 0.90, 0.93) * (0.40 + 0.20 * n.y + 0.75 * max(dot(n, uLight), 0.0) * groundShadow(ph)), 0.9 * fc);
   } else if (op.x > 0.0) {
     col = shadeOpaque(ro + rd * op.x, op.y, op.x);
   } else {
@@ -954,6 +981,7 @@ void main() {
       uMist: o.mist === false ? 0 : 0.22,
       uTime: world.time,
       uDetail: o.detail === false ? 0 : 1,
+      ...(world.sim.foam && o.foam !== false ? world.sim.foam.uniforms : { uFoam: this.noSwell.uSwell, uFoamMap: [0, 0, 0, 0] }),
       uOverlay: o.overlay ? 1 : 0,
       uCursor: o.cursor || [0, 0, 0, 0],
     });
