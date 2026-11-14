@@ -72,6 +72,9 @@ export class World {
    *                                                  the sea beyond the map, for the eye only, with the swell that comes
    *                                                  in from it; a source with `swell: true` holds its strip of the map
    *                                                  at that sea's level (seaLevel), which is what sends the swell in
+   *                                                  With sea.far = { reach, ramp, shallow, hold } the water of the map is
+   *                                                  that sea's too wherever nothing needs the height field: no strips
+   *                                                  then (HeightField.setFar)
    *     solve: [{ lo, hi }]                          boxes of cells whose water is always solved (a cave: no height field),
    *     events: [{ at: seconds, run: (world) => {} }] }
    */
@@ -99,6 +102,7 @@ export class World {
     if (scene.heightfield) {
       const f = scene.heightfield, sp = this.sim.params;
       this.hf = new HeightField(glc, { origin: f.origin, n: dim === 2 ? [f.n[0], 1] : f.n, cell: f.cell || 2, gravity: -sp.gravity[1] / sp.h, params: f.params });
+      if (f.sea && f.sea.far) this.hf.setFar({ level: f.sea.level, depth: f.sea.wave ? f.sea.wave.depth : 1, ...f.sea.far });
       this.setBed();
       this.sim.setHeightField(this.hf);
       // The edge of the map is the edge of the world to its water: a wall to the height field,
@@ -204,6 +208,21 @@ export class World {
 
   _swellSources(t) {
     if (!this.hf) return;
+    this.hf.sea = this.sea(t);
+    // what keeps the water of the map the height field's where it would be the sea's (HeightField.setFar)
+    if (this.hf.far && this.steps % this.hf.far.every === 0) {
+      const sim = this.sim, set = sim.levels[0].set, B = sim.B, an = sim.anchor;
+      for (let s = 0; s < set.high; s++) {
+        if (!set.used[s] || set.state(s) === 2) continue;
+        const x = set.bx[s] * B - an[0], z = set.bz[s] * B - an[2];
+        this.hf.seen(x, z, x + B - 1, z + B - 1);
+      }
+      for (const b of this.bodies || []) {
+        if (b.asleep) continue;
+        const r = (b.extent || 8) + 8;
+        this.hf.seen(b.pos[0] - r, b.pos[2] - r, b.pos[0] + r, b.pos[2] + r);
+      }
+    }
     for (const s of this.hf.sources) {
       if (s.swell) s.level = this.seaLevel(0.5 * (s.box[0] + s.box[2]), 0.5 * (s.box[1] + s.box[3]), t);
     }
@@ -618,7 +637,8 @@ export class World {
    * solved water, 3 solved in 3D; + 4 where the height field holds something it cannot (a front,
    * water leaving the bed), near enough to the focus to be solved, and the column is not: the
    * budget of solved bricks is used up; + 8 where it has a source or a link
-   * (and stays the height field's). Null without a height field.
+   * (and stays the height field's); + 16 where the water is the height field's in name only: the
+   * wave of the sea the map lies in, not solved (HeightField.setFar). Null without a height field.
    */
   tiers() {
     const sim = this.sim, hfc = sim.hfc;
@@ -636,15 +656,19 @@ export class World {
       if (!span || y < span[0] || y > span[1]) continue;
       tier[k] = Math.max(tier[k], set.state(s) === 2 ? 2 : 3);
     }
-    const f = sim.hfFocus, R = sim.params.hfPromoteRadius, b0 = sim._hfBrick0(), B = sim.B;
+    const f = sim.hfFocus, R = sim.hfRadius, b0 = sim._hfBrick0(), B = sim.B;
     for (let k = 0; k < n; k++) {
       // (flagged and not solved: only where it would be, within the radius around the focus)
-      if (hfc.flags[k] && tier[k] && tier[k] < 3 && !hfc.locked[k]) {
+      if (hfc.flags[k] & 3 && tier[k] && tier[k] < 3 && !hfc.locked[k]) {
         const i = k % nc[0], j = (k - i) / nc[0];
         const near = !f || !(R > 0) || Math.hypot((b0[0] + i + 0.5) * B - f[0], this.dim === 3 ? (b0[1] + j + 0.5) * B - f[1] : 0) <= R;
         if (near) tier[k] += 4;
       }
       if (hfc.locked[k]) tier[k] += 8;
+      if (this.hf.far && tier[k] === 1) {
+        const i = k % nc[0], j = (k - i) / nc[0];
+        if (this.hf.needAt((b0[0] + i + 0.5) * B - sim.anchor[0], (b0[1] + j + 0.5) * B - sim.anchor[2]) < 0.5) tier[k] += 16;
+      }
     }
     return { n: nc, tier, origin: sim._hfBrick0() };
   }

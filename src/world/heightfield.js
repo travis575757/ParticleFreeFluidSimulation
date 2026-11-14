@@ -122,6 +122,119 @@ export class HeightField {
       }
     }
     this.glc.upload(this.Bd, data, i0, j0, w, j1 - j0 + 1);
+    this._shoreDirty = true;
+  }
+
+  /**
+   * The sea that the map lies in: `far` = { level, depth (of the open sea, cells), shallow,
+   * reach, ramp, hold, tile, every }, or null for none. Far from everything that happens the
+   * water of the map is then that sea's (this.sea, which the owner sets every step: World.sea),
+   * a level and one long wave, and is not solved: pass "relax" of the shaders.
+   *
+   * Where that is, is kept in a small map of what needs the height field, one value per tile of
+   * `tile` x `tile` texels: 1 within `reach` cells of
+   *   - land, and water less than `shallow` times `depth` deep at rest (a shore, a shoal: there
+   *     the wave is no longer the one of the open sea)
+   *   - a wall, a source, the end of a link
+   *   - whatever the owner has seen there within the last `hold` steps (seen(): water solved
+   *     in 3D, a body that is awake)
+   * falling to 0 over the next `ramp` cells. A tile that is needed is so at once; one that no
+   * longer is goes back to the sea over a few seconds.
+   */
+  setFar(far) {
+    if (this.need) this.glc.deleteTexture(this.need);
+    this.need = null;
+    this.far = far ? { shallow: 0.75, reach: 64, ramp: 128, hold: 300, tile: 8, every: 4, fall: 0.02, ...far } : null;
+    if (!this.far) return;
+    const T = this.far.tile, w = Math.ceil(this.n[0] / T), h = Math.ceil(this.n[1] / T);
+    this.need = this.glc.texture(w, h, 'r32f');
+    this.needA = new Float32Array(w * h).fill(1);    // what the shader has
+    this._needD = new Float32Array(w * h);
+    this._shore = new Uint8Array(w * h);
+    this._seen = new Int32Array(w * h).fill(-1e9);
+    this._shoreDirty = true;
+    this.glc.upload(this.need, this.needA);
+  }
+
+  /** Something that needs the height field is in the box [x0, z0, x1, z1] (cells) now: see setFar. */
+  seen(x0, z0, x1, z1) {
+    if (!this.far) return;
+    const T = this.far.tile * this.cell, w = this.need.w, h = this.need.h;
+    const i0 = Math.max(Math.floor((x0 - this.origin[0]) / T), 0), i1 = Math.min(Math.floor((x1 - this.origin[0]) / T), w - 1);
+    const j0 = h > 1 ? Math.max(Math.floor((z0 - this.origin[1]) / T), 0) : 0, j1 = h > 1 ? Math.min(Math.floor((z1 - this.origin[1]) / T), h - 1) : 0;
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) this._seen[j * w + i] = this.frame;
+  }
+
+  /** The tiles with a shore, a shoal, a wall, a source or the end of a link in them. */
+  _shoreTiles() {
+    const F = this.far, T = F.tile, w = this.need.w, h = this.need.h, [nx, nz] = this.n;
+    const shore = this._shore.fill(0);
+    const least = F.shallow * F.depth;
+    for (let j = 0; j < nz; j++) {
+      for (let i = 0; i < nx; i++) {
+        const k = j * nx + i;
+        if (this.blocked[k] || F.level - this.bed[k] < least) shore[Math.floor(j / T) * w + Math.floor(i / T)] = 1;
+      }
+    }
+    const c = this.cell * T;
+    for (const b of [...this.sources.filter((q) => !q.swell).map((q) => q.box), ...this.links.flatMap((l) => [l.a, l.b])]) {
+      const i0 = Math.max(Math.floor((b[0] - this.origin[0]) / c), 0), i1 = Math.min(Math.floor((b[2] - this.origin[0]) / c), w - 1);
+      const j0 = Math.max(Math.floor((b[1] - this.origin[1]) / c), 0), j1 = Math.min(Math.floor((b[3] - this.origin[1]) / c), h - 1);
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) shore[j * w + i] = 1;
+    }
+    this._shoreDirty = false;
+  }
+
+  /** The map of what needs the height field anew (setFar), every few steps. `fresh`: as it is from now on, at once. */
+  _needUpdate(fresh = false) {
+    const F = this.far, w = this.need.w, h = this.need.h, d = this._needD, a = this.needA;
+    if (this._shoreDirty) this._shoreTiles();
+    const shore = this._shore, seen = this._seen, since = this.frame - F.hold;
+    for (let k = 0; k < d.length; k++) d[k] = shore[k] || seen[k] > since ? 0 : 1e9;
+    // how far it is to the nearest tile that needs it, in tiles: along rows, columns and diagonals, there and back
+    const D = Math.SQRT2;
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) {
+        const k = j * w + i;
+        let v = d[k];
+        if (i > 0) v = Math.min(v, d[k - 1] + 1);
+        if (j > 0) {
+          v = Math.min(v, d[k - w] + 1);
+          if (i > 0) v = Math.min(v, d[k - w - 1] + D);
+          if (i < w - 1) v = Math.min(v, d[k - w + 1] + D);
+        }
+        d[k] = v;
+      }
+    }
+    for (let j = h - 1; j >= 0; j--) {
+      for (let i = w - 1; i >= 0; i--) {
+        const k = j * w + i;
+        let v = d[k];
+        if (i < w - 1) v = Math.min(v, d[k + 1] + 1);
+        if (j < h - 1) {
+          v = Math.min(v, d[k + w] + 1);
+          if (i < w - 1) v = Math.min(v, d[k + w + 1] + D);
+          if (i > 0) v = Math.min(v, d[k + w - 1] + D);
+        }
+        d[k] = v;
+      }
+    }
+    const c = F.tile * this.cell;
+    let changed = false;
+    for (let k = 0; k < d.length; k++) {
+      const want = Math.min(Math.max(1 - (d[k] * c - F.reach) / F.ramp, 0), 1);
+      const v = fresh || want >= a[k] ? want : Math.max(a[k] - F.fall, want);
+      if (v !== a[k]) { a[k] = v; changed = true; }
+    }
+    if (changed || fresh) this.glc.upload(this.need, a);
+  }
+
+  /** What needs the height field at (x, z), cells: 1 it is the height field's water, 0 the sea's (setFar); 1 without such a sea. */
+  needAt(x, z) {
+    if (!this.far) return 1;
+    const c = this.far.tile * this.cell, w = this.need.w, h = this.need.h;
+    const i = Math.min(Math.max(Math.floor((x - this.origin[0]) / c), 0), w - 1), j = Math.min(Math.max(Math.floor((z - this.origin[1]) / c), 0), h - 1);
+    return this.needA[j * w + i];
   }
 
   /** The state: depth(x, z, bed) and, if given, velocity(x, z) => [u, w] at the low faces of each texel. */
@@ -142,6 +255,7 @@ export class HeightField {
     this.glc.upload(this.H[0], data);
     this.glc.clear(this.X[0]);
     this.frame = 0;
+    if (this.far) { this._seen.fill(-1e9); this._shoreDirty = true; this._needUpdate(true); }
     this.speed = 0;
     this._run++;
     this.added = this.removed = this.linked = this.linkLost = 0;
@@ -237,6 +351,17 @@ export class HeightField {
       X.reverse();
       glc.draw(P.vel, H[0], { uH: H[1], ...U });
     }
+    if (this.far && this.sea) {
+      if (this.frame % this.far.every === 0) this._needUpdate();
+      const w = this.sea;
+      glc.draw(P.relax, [H[1], this.dS], {
+        uH: H[0], uBed: this.Bd, uNeed: this.need, uTile: this.far.tile, uG: this.gravity, uDry: p.dry,
+        uSea: [w.level, w.amp, w.k, w.phase], uSeaDir: [w.dir[0], w.dir[1], w.origin[0] * w.dir[0] + w.origin[1] * w.dir[1], 0],
+        uMap: [this.origin[0], this.origin[1], this.cell, 0],
+      });
+      H.reverse();
+      this.meter();
+    }
     this.subSteps = sub;
     this.frame++;
     if (this.frame % p.look === 0) {
@@ -327,6 +452,6 @@ export class HeightField {
   }
 
   dispose() {
-    for (const t of [...this.H, this.Bd, this.dS, ...this.pyr, this.ledger, ...this.X, ...this.linkStat]) this.glc.deleteTexture(t);
+    for (const t of [...this.H, this.Bd, this.dS, ...this.pyr, this.ledger, ...this.X, ...this.linkStat, ...(this.need ? [this.need] : [])]) this.glc.deleteTexture(t);
   }
 }

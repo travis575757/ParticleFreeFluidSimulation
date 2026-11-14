@@ -46,6 +46,13 @@ const SHOTS = [
   { name: 'world-cave', page: 'world3d.html?scene=cave', steps: 1445 },
   { name: 'world-spring', page: 'world3d.html?scene=spring', steps: 2400 },
   { name: 'app-world-surf', page: 'world3d.html?scene=surf', steps: 2400, ui: true },
+  // ... an island: its water the open sea's (a formula), the height field's or the 3D solver's, as each place needs
+  { name: 'world-island', page: 'world3d.html?scene=island&target=125,52,92&dist=1080', steps: 1200 },
+  { name: 'world-island-beach', page: 'world3d.html?scene=island&target=-190,42,215&dist=300&yaw=2.4&pitch=0.4', steps: 1200 },
+  { name: 'world-island-cliffs', page: 'world3d.html?scene=island&target=-215,45,-215&dist=260&yaw=-2.2&pitch=0.35', steps: 1200 },
+  { name: 'world-island-stream', page: 'world3d.html?scene=island&target=30,75,-40&dist=190&yaw=1.3&pitch=0.45', steps: 900 },
+  { name: 'world-island-cove', page: 'world3d.html?scene=island&target=215,42,62&dist=200&yaw=0.6&pitch=0.55', steps: 900 },
+  { name: 'app-world-island', page: 'world3d.html?scene=island', steps: 900, ui: true },
   // ... the ground worked on while the water runs, as the Raise and Dig tools do it (World.editTerrain):
   // strokes of [first step, last step, x, z, radius, cells per second]
   { name: 'world-ground', page: 'world3d.html?scene=cascade&target=66,108,0&dist=210&yaw=0.9&pitch=0.5', steps: 700, ground: [[400, 460, 55, 6, 9, -10], [400, 500, 96, -12, 14, 10]] },

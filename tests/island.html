@@ -1,0 +1,139 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>the island: open sea, height field and 3D solver, each where the water needs it</title>
+<canvas id="c" width="64" height="64"></canvas>
+<script type="module">
+// The island scene has its water in three ways, and what the water does decides which:
+//   the swell of the open sea, a formula, where nothing else happens (HeightField.setFar)
+//   the height field, around the land and whatever is solved
+//   the 3D solver, where a height field cannot hold the water: around bodies that are awake, at
+//     the falls of the stream, where the swell breaks
+// The view decides nothing of that. Only when there is more for the solver than its budget of
+// bricks holds does the budget go to what is nearest to the view (SparseSim._hfBudget).
+//   start: with the view on the open sea, 6 s in: all three are there; the water around every
+//     body that is awake and at every fall of the stream is solved; the open sea is the formula
+//     to the last digits and nothing is solved in it, the view on it or not
+//   cliffs: the view goes to the cliffs for 12 s. The swell breaks on their shelf and is solved,
+//     within the budget
+//   beach: the view goes to the beach for 10 s. The budget follows it: the surf on the beach is
+//     solved, that under the cliffs is the height field's again; and the books balance
+import { GLContext } from '../src/gl.js';
+import { World } from '../src/world/world.js';
+import { WORLD_SCENES } from '../src/world/scenes.js';
+
+const log = (s) => console.log(s);
+let failed = 0;
+const check = (ok, what) => { if (!ok) failed++; log(`${ok ? 'PASS' : 'FAIL'}  ${what}`); };
+const pause = () => new Promise((r) => setTimeout(r));
+const e = (v, d = 1) => v.toExponential(d);
+
+try {
+  if (document.readyState !== 'complete') await new Promise((r) => window.addEventListener('load', r));
+  const glc = new GLContext(document.getElementById('c'));
+  log(`readback ${glc.readback} | ${glc.renderer}`);
+  const scene = WORLD_SCENES.island.build();
+  const world = new World(glc, 3, scene);
+  const { sim, hf } = world;
+  const m = scene.marks, sea = m.sea, B = sim.B, an = sim.anchor;
+  const budget = sim.params.maxSolved;
+  // (the budget is overrun for a while when the view moves: what it leaves behind goes back
+  // up to pinHold steps late. 1539 bricks in Chrome, 1593 in LibreWolf.)
+  const over = 1.15;
+  let steps = 0, most = 0;
+  const run = async (n) => {
+    for (let i = 0; i < n; i++) {
+      world.step();
+      await world.forcesReady;
+      steps++;
+      most = Math.max(most, sim.bricks - sim.nHeld);
+      if (steps % 20 === 0) await pause();
+    }
+  };
+  // the columns of bricks of the map: [x, z of the middle (cells), tier]
+  const columns = () => {
+    const tr = world.tiers(), out = [];
+    for (let k = 0; k < tr.tier.length; k++) {
+      const i = k % tr.n[0], j = (k - i) / tr.n[0];
+      out.push([(tr.origin[0] + i + 0.5) * B - an[0], (tr.origin[1] + j + 0.5) * B - an[2], tr.tier[k]]);
+    }
+    return out;
+  };
+  const solved = (c) => (c[2] & 3) === 3;
+  const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+  // (the stretches of shore the scene has them on: bearings from the middle of the island)
+  const under = (bearing, width) => (c) => solved(c) && Math.hypot(c[0], c[1]) > 200 && Math.abs(wrap(Math.atan2(c[1], c[0]) - bearing)) < width;
+  const cliffs = under(-2.35, 0.9), beach = under(2.3, 0.8);
+
+  // ------------------------------------------------------------------ the view on the open sea
+  const out = [620, sea, 40];
+  world.setFocus(out, false);
+  await run(360);
+  {
+    const cols = columns();
+    const wet = cols.filter((c) => c[2] & 3);
+    const open = wet.filter((c) => c[2] & 16).length, three = wet.filter(solved).length, field = wet.length - open - three;
+    const pc = (n) => (100 * n / wet.length).toFixed(1);
+    check(open > 0 && field > 0 && three > 0,
+      `start: after ${steps} steps, of ${wet.length} columns of bricks with water ${pc(open)} % are the open sea's (a formula), ${pc(field)} % the height field's and ${pc(three)} % solved in 3D (${sim.bricks - sim.nHeld} bricks)`);
+    const tierAt = (x, z) => { let best = null, d = Infinity; for (const c of cols) { const q = Math.hypot(c[0] - x, c[1] - z); if (q < d) { d = q; best = c; } } return best; };
+    const awake = world.bodies.filter((b) => !b.asleep);
+    const afloat = awake.filter((b) => solved(tierAt(b.pos[0], b.pos[2]))).length;
+    check(awake.length > 0 && afloat === awake.length, `the water under every body that is awake is solved (${afloat} of ${awake.length})`);
+    // (the falls the stream has reached so far: water a fifth of a cell deep within 6 cells of the lip)
+    const st = hf.read(), [nx] = hf.n, w = world.sea();
+    const runs = (l) => {
+      for (let dz = -6; dz <= 6; dz += 2) for (let dx = -6; dx <= 6; dx += 2) {
+        const i = Math.floor((l[0] + dx - hf.origin[0]) / hf.cell), j = Math.floor((l[1] + dz - hf.origin[1]) / hf.cell);
+        if (st.h[j * nx + i] > 0.2) return true;
+      }
+      return false;
+    };
+    const falls = m.ledges.filter((l) => l[2] >= 5 && runs(l));
+    const gap = falls.map((l) => Math.min(...cols.filter(solved).map((c) => Math.hypot(c[0] - l[0], c[1] - l[1]))));
+    check(falls.length >= 2 && gap.every((d) => d < 2 * B),
+      `and at every fall the stream has reached (${falls.length}: ${falls.map((l) => l[2].toFixed(0)).join(', ')} cells high, the nearest solved column ${gap.map((d) => d.toFixed(0)).join(', ')} cells from the lip)`);
+    // the open sea: the formula, and nothing solved in it
+    let off = 0, n = 0;
+    for (let j = 8; j < hf.n[1]; j += 37) {
+      for (let i = 8; i < nx; i += 41) {
+        const [x, z] = hf.center(i, j);
+        // (the sea's alone: so are the tiles around)
+        if (![-1, 0, 1].every((a) => [-1, 0, 1].every((b) => hf.needAt(x + 16 * a, z + 16 * b) === 0))) continue;
+        n++;
+        off = Math.max(off, Math.abs(st.h[j * nx + i] - (world.seaLevel(x, z) - hf.bed[j * nx + i])));
+      }
+    }
+    const inSea = cols.filter((c) => solved(c) && hf.needAt(c[0], c[1]) < 0.5).length;
+    const near = cols.filter((c) => solved(c) && Math.hypot(c[0] - out[0], c[1] - out[2]) < 2 * sim.params.hfNear).length;
+    check(n > 50 && off < 1e-4 && inSea === 0 && near === 0,
+      `the open sea is its swell (${w.amp.toFixed(2)} cells high now) within ${e(off)} cells at ${n} places, and none of its columns is solved (${inSea}), nor any within ${2 * sim.params.hfNear} cells of where the view is (${near})`);
+  }
+
+  // ------------------------------------------------------------------ the view on the cliffs
+  world.setFocus([-215, sea, -215], false);
+  await run(720);
+  const atCliffs = columns().filter(cliffs).length;
+  check(atCliffs >= 30 && most <= over * budget,
+    `cliffs: 12 s with the view on them: ${atCliffs} columns of the surf on their shelf are solved; never more than ${most} bricks solved, of a budget of ${budget}`);
+
+  // ------------------------------------------------------------------ the view on the beach
+  world.setFocus([-190, sea, 215], false);
+  await run(600);
+  {
+    const cols = columns();
+    const c = cols.filter(cliffs).length, b = cols.filter(beach).length;
+    check(b >= 20 && c <= atCliffs / 5 && most <= over * budget,
+      `beach: 10 s with the view on it: ${b} columns of its surf are solved, ${c} of the cliffs' (${atCliffs} before); never more than ${most} bricks solved (the radius the budget allows is ${sim.hfReach === Infinity ? 'unlimited' : sim.hfReach.toFixed(0) + ' cells'} now)`);
+    const off = await world.balanceSettled();
+    const tol = 2e-5 * world.water0;
+    check(Math.abs(off) <= tol, `the books: off by ${e(off)} cells of ${e(world.water0)} (allowed ${e(tol)}); the sea gave ${e(hf.added)} and took ${e(hf.removed)}`);
+  }
+  world.dispose();
+  log(failed ? `${failed} check(s) failed` : 'all checks passed');
+} catch (err) {
+  console.log('ERROR ' + (err.stack || err));
+  window.__error = String(err);
+}
+window.__done = true;
+</script>

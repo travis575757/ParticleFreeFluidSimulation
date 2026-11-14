@@ -13,9 +13,13 @@
 //   a film of a tenth of a cell on a slope of 45 degrees stays finite
 //   a round dam break on a map keeps its symmetry
 //   two lakes joined by a link under the ground equalise as the law of the link says
+//   a map that lies in a sea (setFar): far from everything its water is that sea's wave to the
+//     last bit, the wave comes through the water that is the height field's unchanged, what a
+//     splash sends out does not come back from the edge of the map, and a place that was needed
+//     goes back to the sea when it no longer is
 //   and none of them loses or gains water
 // Lengths are cells of 10 cm, g = 98.1 cells / s^2, 60 steps per second.
-//   ?only=sum,lake,wet,dry,bowl,bump,film,round,link  &time=1 (ms per step at 256, 512 and 1024 texels)
+//   ?only=sum,lake,wet,dry,bowl,bump,film,round,link,far  &time=1 (ms per step at 256, 512 and 1024 texels)
 import { GLContext } from '../src/gl.js';
 import { HeightField } from '../src/world/heightfield.js';
 import { LOST } from '../src/shaders/heightfield.js';
@@ -288,6 +292,92 @@ void main() { float s = uA + uB; o = vec4(s, lost(uA, uB, s), 0.0, 0.0); }`);
     check(Math.abs(hf.linkLost) < 1e-6 * v0 && hf.linked > 0, `what left one lake arrived in the other: ${hf.linked.toFixed(0)} cells moved, ${hf.linkLost.toExponential(1)} unaccounted for`);
     books(hf, v0, 'two lakes');
     hf.dispose();
+  }
+
+  if (want('far')) {
+    // A level bed 30 cells under a sea with a swell of 0.3 cells and 5 s from the west (a small
+    // wave: the height field's equations steepen a large one, the sea's formula does not). The
+    // map is 768 x 384 cells; a body in the middle of it keeps the water around it the height
+    // field's: seen() every step, as World does.
+    const n = [384, 192], depth = 30, amp = 0.3, period = 5;
+    const omega = 2 * Math.PI / period, k = omega / Math.sqrt(g * depth);
+    const sea = (t, a = amp) => ({ level: depth, amp: a, k, phase: (omega * t) % (2 * Math.PI), dir: [1, 0], origin: [0, 0] });
+    const eta = (x, t, a = amp) => a * Math.sin(omega * t - k * x);
+    const mid = [384, 192];
+    const start = (a) => {
+      const hf = make(n);
+      hf.setFar({ level: depth, depth, reach: 48, ramp: 128 });
+      hf.setBed(() => 0);
+      hf.fill(depth);
+      hf.sea = sea(0, a);
+      return hf;
+    };
+    {
+      const hf = start(amp);
+      const v0 = hf.volume();
+      let t = 0, worst = 0;
+      const at = (st, x, z) => { const i = Math.floor(x / 2), j = Math.floor(z / 2), c = j * n[0] + i; return { h: st.h[c], u: st.u[c] }; };
+      for (let i = 0; i < 1500; i++) {
+        hf.seen(mid[0] - 8, mid[1] - 8, mid[0] + 8, mid[1] + 8);
+        t += dt;
+        hf.sea = sea(t);
+        hf.step(dt);
+        // (the last two periods: the surface in the middle against the sea's)
+        if (i >= 900 && i % 10 === 0) worst = Math.max(worst, Math.abs(at(hf.read(), mid[0] + 1, mid[1] + 1).h - depth - eta(mid[0] + 1, t)));
+      }
+      const st = hf.read();
+      // the sea's own water: at a corner of the map and at its west edge
+      let off = 0, offU = 0;
+      for (const [x, z] of [[1, 1], [101, 31], [767, 383], [1, 191], [701, 301]]) {
+        const s = at(st, x, z);
+        off = Math.max(off, Math.abs(s.h - depth - eta(x, t)));
+        offU = Math.max(offU, Math.abs(s.u - eta(x - 1, t) * Math.sqrt(g / depth)));
+      }
+      check(hf.needAt(1, 1) === 0 && hf.needAt(...mid) === 1 && off < 2e-5 && offU < 2e-5,
+        `far: 25 s of a swell of ${amp} cells. Where nothing needs the height field its water is the sea's wave: depth within ${off.toExponential(1)} cells, velocity within ${offU.toExponential(1)} cells/s of the formula (map of what is needed: ${hf.needAt(1, 1)} at the corner, ${hf.needAt(...mid)} in the middle)`);
+      check(worst < 0.1 * amp, `in the middle, ${48 + 128} cells inside the water that is the height field's to move, the surface follows the same wave within ${(100 * worst / amp).toFixed(1)} % of its height over the last two periods`);
+      books(hf, v0, 'a map in a sea');
+      // nothing is seen there any more: the place goes back to the sea
+      const wait = hf.far.hold + hf.far.every / hf.far.fall + 2 * hf.far.every;
+      for (let i = 0; i < wait; i++) { t += dt; hf.sea = sea(t); hf.step(dt); }
+      const s = at(hf.read(), mid[0] + 1, mid[1] + 1);
+      check(hf.needAt(...mid) === 0 && Math.abs(s.h - depth - eta(mid[0] + 1, t)) < 2e-5,
+        `${wait} steps after the body has gone the middle is the sea's again (needed: ${hf.needAt(...mid)}; depth within ${Math.abs(s.h - depth - eta(mid[0] + 1, t)).toExponential(1)} cells of the wave)`);
+      hf.dispose();
+    }
+    {
+      // a splash in the middle of a sea without swell: a hump 3 cells high. Its rings go out
+      // into the sea and are gone; from the walls of a map without a sea they come back.
+      const left = (far) => {
+        const hf = make(n);
+        if (far) hf.setFar({ level: depth, depth, reach: 48, ramp: 128 });
+        hf.setBed(() => 0);
+        hf.setState((x, z) => depth + 3 * Math.exp(-((x - mid[0]) ** 2 + (z - mid[1]) ** 2) / 800));
+        hf.sea = sea(0, 0);
+        const v0 = hf.volume();
+        for (let i = 0; i < 1200; i++) { if (far) hf.seen(mid[0] - 8, mid[1] - 8, mid[0] + 8, mid[1] + 8); hf.step(dt); }
+        const st = hf.read();
+        let most = 0;
+        for (let c = 0; c < st.h.length; c++) most = Math.max(most, Math.abs(st.h[c] - depth));
+        if (far) books(hf, v0, 'a splash in a sea');
+        hf.dispose();
+        return most;
+      };
+      const open = left(true), walled = left(false);
+      check(open < 0.01 && walled > 10 * open,
+        `a hump of 3 cells in the middle: 20 s later the surface is within ${open.toExponential(1)} cells of the sea's everywhere (between walls, without a sea: ${walled.toFixed(3)} cells of waves still going)`);
+    }
+    {
+      // ground that is raised out of the sea makes a shore, and the water around it the height field's
+      const hf = start(0);
+      const before = hf.needAt(600, 300);
+      hf.setBedIn((x, z) => 40 * Math.exp(-((x - 600) ** 2 + (z - 300) ** 2) / 200), [560, 260, 640, 340]);
+      hf.step(dt);
+      for (let i = 0; i < 4; i++) hf.step(dt);
+      check(before === 0 && hf.needAt(600, 300) === 1 && hf.needAt(1, 1) === 0,
+        `ground raised out of the sea at (600, 300): what is needed there goes from ${before} to ${hf.needAt(600, 300)} (${hf.needAt(1, 1)} at the corner)`);
+      hf.dispose();
+    }
   }
 
   if (q.get('time') === '1') {

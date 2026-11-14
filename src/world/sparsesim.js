@@ -99,10 +99,15 @@ export const SPARSE_PARAMS = {
   hfPromote: 1,
   hfSteep: 0.3,        // a front: steeper than this between two texels ...
   hfBreak: 0.5,        // ... and higher than this share of the depth before it (a bore about to break; water coming over a dry bed)
+  hfFrontMin: 0,       // ... and at least this high (cells): the wash of small waves on a shore is no front
+  hfNear: 0,           // within this many cells of what the camera looks at, half of each of the three makes a front
+                       // (0: nowhere). The view decides nothing else: calm water is the height field's wherever it is looked at.
   hfFall: 1,           // water leaves the bed: it runs over a drop steeper than this, down to a level below the lip ...
   hfFallMin: 0.2,      // ... and is at least this deep on the lip (cells)
   hfFallSpeed: 0.02,   // ... and runs over it at least this fast (cells per step)
   hfPromoteRadius: 0,  // only within this many cells of what the camera looks at (hfFocus); 0: wherever it is
+  hfByView: 0,         // 1: wherever it is while the budget of solved bricks (maxSolved) lasts; used up, it goes to the
+                       // water nearest to what the camera looks at (_hfBudget)
 };
 
 const MAX_LEVELS = 24;
@@ -251,6 +256,7 @@ export class SparseSim extends FluidSim {
     this.hfc = null;
     this.hfWater = null;
     this.hfFocus = null;              // [x, z] of what the camera looks at (cells), or null: see _hfPromote
+    this.hfReach = Infinity;          // see _hfBudget
     if (this.swell && hf) { this.swell.dispose(); this.swell = null; }
     this._setFoam();
     if (!hf) return;
@@ -419,7 +425,7 @@ export class SparseSim extends FluidSim {
     const p = this.params;
     glc.draw(hfc.P.cols, hfc.look, {
       uH: hf.H[0], uBed: hf.Bd, uPer: hfc.per, uDry: hf.params.dry, uDx: hf.cell,
-      uSteep: p.hfSteep, uBreak: p.hfBreak, uFall: p.hfFall, uFallMin: p.hfFallMin, uFallSpeed: p.hfFallSpeed / p.dt,
+      uSteep: p.hfSteep, uBreak: p.hfBreak, uFrontMin: p.hfFrontMin, uFall: p.hfFall, uFallMin: p.hfFallMin, uFallSpeed: p.hfFallSpeed / p.dt,
     });
     const take = (d) => {
       const out = hfc.data;
@@ -430,7 +436,7 @@ export class SparseSim extends FluidSim {
         out[k + 1] = d[k + 1];
         const f = Math.round(d[k + 2]);
         hfc.flags[k >> 2] = f;
-        if (f) any = true;
+        if (f & (p.hfNear > 0 ? 7 : 3)) any = true;
       }
       hfc.dirty = true;
       hfc.tidy = true;
@@ -730,7 +736,7 @@ export class SparseSim extends FluidSim {
    * places a scene names apart: those are pinned).
    */
   _hfBeyond(x, z) {
-    const f = this.hfFocus, R = this.params.hfPromoteRadius;
+    const f = this.hfFocus, R = this.hfRadius;
     if (!this.hfc || !f || !(R > 0) || this._hfCol(x, z) < 0) return false;
     const B = this.B;
     return Math.hypot((x + 0.5) * B - f[0], this.dim === 3 ? (z + 0.5) * B - f[1] : 0) > 1.5 * (R + B);
@@ -770,10 +776,51 @@ export class SparseSim extends FluidSim {
     return !(t >= 0 && this.pinOf[t] > this._pinStamp - this.params.pinHold);
   }
 
+  /**
+   * The radius around hfFocus beyond which the height field's water is not solved (cells): the
+   * scene's (hfPromoteRadius), or the one the budget allows (hfByView; Infinity while it lasts).
+   * 0: there is none.
+   */
+  get hfRadius() {
+    const p = this.params;
+    return p.hfPromoteRadius > 0 ? p.hfPromoteRadius : p.hfByView ? this.hfReach : 0;
+  }
+
+  /**
+   * With hfByView the water that needs the solver gets it wherever it is, for as long as the
+   * budget of solved bricks lasts. Used up, the budget goes to what is nearest to the view:
+   * the radius around hfFocus within which the height field's water is solved (hfReach) comes
+   * in, from the farthest solved column inwards, until what is left fits, and goes out again
+   * when there is room. What it leaves behind is handed back as it is (_hfConfine); bodies, the
+   * brush and the places a scene names keep their water whatever the radius (pins).
+   */
+  _hfBudget() {
+    const p = this.params;
+    if (!p.hfByView || p.hfPromoteRadius > 0 || !this.hfFocus) { this.hfReach = Infinity; return; }
+    const set = this.levels[0].set, B = this.B, f = this.hfFocus;
+    const budget = p.maxSolved || (this.dim === 3 ? 3000 : 600), solved = set.count - this.nHeld;
+    const short = this.unpromoted > this._unpromoted || this._room <= 0;
+    this._unpromoted = this.unpromoted;
+    const least = Math.max(p.hfNear, 4 * B);
+    if (short) {
+      let far = 0;
+      for (let s = 0; s < set.high; s++) {
+        if (!set.used[s] || set.state(s) === 2 || this._hfCol(set.bx[s], set.bz[s]) < 0) continue;
+        far = Math.max(far, Math.hypot((set.bx[s] + 0.5) * B - f[0], this.dim === 3 ? (set.bz[s] + 0.5) * B - f[1] : 0));
+      }
+      // (what is handed back lies beyond one and a half times the radius: _hfBeyond)
+      this.hfReach = Math.max(0.92 * Math.min(this.hfReach, far / 1.5), least);
+    } else if (solved < 0.8 * budget && this.hfReach < Infinity) {
+      this.hfReach *= 1.03;
+      const hf = this.hf;
+      if (this.hfReach > Math.hypot(hf.n[0], hf.n[1]) * hf.cell) this.hfReach = Infinity;
+    }
+  }
+
   /** Hand back what is solved where the focus has left it behind (_hfOut), as it is. */
   _hfConfine() {
-    const hfc = this.hfc, p = this.params;
-    if (!this.hfFocus || !(p.hfPromoteRadius > 0)) return;
+    const hfc = this.hfc;
+    if (!this.hfFocus || !(this.hfRadius > 0) || this.hfRadius === Infinity) return;
     const set = this.levels[0].set;
     for (let s = 0; s < set.high; s++) {
       if (!set.used[s] || set.state(s) === 2) continue;
@@ -803,7 +850,7 @@ export class SparseSim extends FluidSim {
     hfc.promote = false;
     if (!p.hfPromote) return;
     const set = this.levels[0].set, b0 = this._hfBrick0(), nc = hfc.nc;
-    const f = this.hfFocus, R = f && p.hfPromoteRadius > 0 ? p.hfPromoteRadius / B : Infinity;
+    const f = this.hfFocus, R = f && this.hfRadius > 0 ? this.hfRadius / B : Infinity;
     const far = (i, j) => (f ? Math.hypot(b0[0] + i + 0.5 - f[0] / B, dim === 3 ? b0[1] + j + 0.5 - f[1] / B : 0) : 0);
     const lowest = (x, z) => {
       const span = this._hfSpan(x, z);
@@ -830,13 +877,15 @@ export class SparseSim extends FluidSim {
       for (let Y = span[0]; Y <= span[1]; Y++) { const u = set.get(x, Y, z); if (u >= 0) this.pinOf[u] = stamp; }
     };
     const Rz = dim === 3 ? 1 : 0;
-    for (const want of [2, 1]) {
-      this._cause = want === 2 ? 'fall' : 'front';
+    const near = f && p.hfNear > 0 ? p.hfNear / B : -1;
+    for (const want of [2, 1, 4]) {
+      if (want === 4 && near < 0) break;
+      this._cause = want === 2 ? 'fall' : want === 1 ? 'front' : 'near';
       const list = [];
       for (let k = 0; k < hfc.flags.length; k++) {
         if (!(hfc.flags[k] & want)) continue;
         const i = k % nc[0], j = Math.floor(k / nc[0]), d = far(i, j);
-        if (d <= R) list.push([d, i, j]);
+        if (d <= (want === 4 ? Math.min(R, near) : R)) list.push([d, i, j]);
       }
       list.sort((u, v) => u[0] - v[0]);
       for (const [, i, j] of list) {
@@ -1069,6 +1118,8 @@ export class SparseSim extends FluidSim {
     this.report = null;               // summary of the last report acted on
     this.refused = 0;                 // bricks that were wanted while the pool was full
     this.unpromoted = 0;              // columns of a height field that should have been solved with the budget used up (counted per look)
+    this._unpromoted = 0;
+    this.hfReach = Infinity;
     // bricks of water at rest (or of a height field) that were made solved ones, by what did it: a pin
     // (a body, the brush, a place the scene names), the view (a soft pin), fast liquid, moving liquid,
     // a fall or a front of the height field, the column a solved brick belongs to
@@ -1596,7 +1647,7 @@ export class SparseSim extends FluidSim {
     if (this.params.lifecycle) this._lifecycle();
     // (when the bricks have changed, or the height field has been looked at since)
     if (this.hfc && this.hfc.promote) this._hfPromote();
-    if (this.hfc && this.frame % 8 === 0) this._hfConfine();
+    if (this.hfc && this.frame % 8 === 0) { this._hfBudget(); this._hfConfine(); }
     if (this.hfc && (this.hfc.rebase || this.hfc.tidy)) { this.hfc.tidy = false; this._hfTidy(); }
     this._syncBricks();
     if (this._groundMoved) this._groundRefresh();

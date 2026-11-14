@@ -212,6 +212,64 @@ void main() {
   oD = vec4(max(h - s.r, 0.0), max(s.r - h, 0.0), 0.0, 0.0);
 }`;
 
+  // The sea that the map lies in (World.sea: a level and one long wave), where nothing else
+  // happens. uNeed says where that is, per tile of uTile x uTile texels: 1 where the water is the
+  // height field's to move (near land, in shallows, around solved water, bodies and sources), 0
+  // where it is the sea's, and in between on the way from one to the other (HeightField._needUpdate).
+  // Where it is the sea's, depth and velocity are those of the wave: nothing is solved there, and
+  // the water joins the sea that is drawn beyond the edge of the map without a step. In between
+  // they are drawn towards the wave, the more the further out: what the land sends back goes
+  // out through that band and does not return. Once per step, after the sub-steps; oD as for the
+  // sources (the books count what the sea gave and took).
+  S.relax = `${HEAD}${FETCH}
+uniform sampler2D uNeed;
+uniform float uTile;
+uniform vec4 uSea;            // level, amplitude, wave number, phase
+uniform vec4 uSeaDir;         // direction, origin . direction
+uniform vec4 uMap;            // corner of the map (cells), cells per texel
+uniform float uG;
+uniform float uDry;
+layout(location = 0) out vec4 o;
+layout(location = 1) out vec4 oD;
+// between the middles of the four tiles around p (texels)
+float need(vec2 p) {
+  ivec2 n = textureSize(uNeed, 0);
+  vec2 q = p / uTile - 0.5;
+  ivec2 i0 = ivec2(floor(q));
+  vec2 f = q - floor(q);
+  ivec2 a = clamp(i0, ivec2(0), n - 1), b = clamp(i0 + 1, ivec2(0), n - 1);
+  float lo = mix(texelFetch(uNeed, a, 0).r, texelFetch(uNeed, ivec2(b.x, a.y), 0).r, f.x);
+  float hi = mix(texelFetch(uNeed, ivec2(a.x, b.y), 0).r, texelFetch(uNeed, b, 0).r, f.x);
+  return mix(lo, hi, f.y);
+}
+// the surface of the sea over its level at p (texels)
+float wave(vec2 p) {
+  return uSea.y * sin(uSea.w - uSea.z * (dot(uMap.xy + p * uMap.z, uSeaDir.xy) - uSeaDir.z));
+}
+void main() {
+  ivec2 t = ivec2(gl_FragCoord.xy);
+  vec4 s = texelFetch(uH, t, 0);
+  o = s;
+  oD = vec4(0.0);
+  vec2 b = texelFetch(uBed, t, 0).rg;
+  if (s.a > 0.5 || b.y > 0.5) return;
+  vec2 p = vec2(t) + 0.5;
+  float a = need(p);
+  // (ground above the sea is nobody's water)
+  float rest = uSea.x - b.x;
+  if (a >= 1.0 || rest <= uDry) return;
+  float r = (1.0 - a) * (1.0 - a) * (1.0 - a);
+  float h = s.r + (max(rest + wave(p), 0.0) - s.r) * r;
+  // a long wave moves its water at (surface over the level) sqrt(g / depth), the way it runs;
+  // (a face of the 3D solver's is left as it is: see "vel")
+  float c = sqrt(uG / max(rest, 1.0));
+  float u = s.g, w = s.b;
+  if (st(t - ivec2(1, 0)).a < 0.5) u += (wave(p - vec2(0.5, 0.0)) * c * uSeaDir.x - u) * r;
+  if (textureSize(uH, 0).y > 1 && st(t - ivec2(0, 1)).a < 0.5) w += (wave(p - vec2(0.0, 0.5)) * c * uSeaDir.y - w) * r;
+  o = vec4(h, u, w, s.a);
+  oD = vec4(max(h - s.r, 0.0), max(s.r - h, 0.0), 0.0, 0.0);
+}`;
+
   // Links: water that goes from one place of the map to another by a way the map does not show
   // (a sinkhole and the spring it feeds). Each link joins two boxes of texels, A and B. What flows
   // follows from the difference of their levels: through a pipe (uLinkP.y = 0) c sqrt(dH), by

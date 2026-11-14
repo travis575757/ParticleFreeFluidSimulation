@@ -19,7 +19,7 @@ function fail(msg) {
 }
 
 const state = {
-  scene: q.get('scene') in WORLD_SCENES ? q.get('scene') : 'waterfall',
+  scene: q.get('scene') in WORLD_SCENES ? q.get('scene') : 'island',
   paused: q.has('paused'),
   tool: 'orbit',
   brush: 6,                 // brush radius in cells
@@ -83,7 +83,7 @@ function loadScene(keepCamera = false) {
 function fitPanel() {
   if (!panel) return;
   const sim = world.sim;
-  const has = { tiers: !!world.hf, focus: !!world.hf, swell: !!sim.swell, foam: !!sim.foam };
+  const has = { tiers: !!world.hf, focus: !!world.hf && world.params.focusRadius > 0, swell: !!sim.swell, foam: !!sim.foam };
   for (const k in has) panel.controls[k].closest('label').style.display = has[k] ? '' : 'none';
 }
 
@@ -274,7 +274,7 @@ function buildPanel() {
     'Outlines of the 8 x 8 x 8 cell bricks that are stored: blue where they hold liquid, amber where they hold water at rest that is kept but not solved, grey where they are kept as a margin.');
   // (the next three are of some scenes only: fitPanel leaves out those that do nothing in the scene that is loaded)
   P.checkbox('tiers', 'Show the solver map', state.tiers, (v) => { state.tiers = v; },
-    'Which solver has the water: a map of the scene\'s columns of bricks, seen from above, in the corner of the view. Blue: the height field alone. Amber: a copy of it stored next to solved water. Light: solved in 3D. Red: should be solved (a front, a fall) but the budget of solved bricks is used up. Violet: a source, a sink or the end of a link, which stays the height field\'s.');
+    'Which solver has the water: a map of the scene\'s columns of bricks, seen from above, in the corner of the view. Dark blue: the swell of the open sea, a formula, not solved. Blue: the height field. Amber: a copy of it stored next to solved water. Light: solved in 3D. Red: should be solved (a front, a fall) but the budget of solved bricks is used up. Violet: a source, a sink or the end of a link, which stays the height field\'s.');
   P.checkbox('focus', 'Solve in 3D around the view target', state.focus, (v) => { state.focus = v; },
     'In a scene with a height field, the water around the point the camera turns about is handed to the 3D solver, as far as the budget of solved bricks allows, and goes back to the height field when the view moves on. Off: only what a height field cannot hold is solved in 3D (fronts, falls, splashes, the water around bodies and the brush).');
   P.checkbox('swell', 'Show the waves beyond the solved water', state.swell, (v) => { state.swell = v; },
@@ -330,6 +330,7 @@ window.addEventListener('keydown', (ev) => {
   else if (ev.key === 'b' || ev.key === 'B') { state.overlay = !state.overlay; panel.controls.bricks.checked = state.overlay; }
   else if (ev.key === '0') { const k = Object.keys(WORLD_SCENES)[9]; if (k) { state.scene = k; panel.controls.scene.value = k; loadScene(); } }
   else if (ev.key === '-') { const k = Object.keys(WORLD_SCENES)[10]; if (k) { state.scene = k; panel.controls.scene.value = k; loadScene(); } }
+  else if (ev.key === '=') { const k = Object.keys(WORLD_SCENES)[11]; if (k) { state.scene = k; panel.controls.scene.value = k; loadScene(); } }
   else if (/^[1-9]$/.test(ev.key)) {
     const k = Object.keys(WORLD_SCENES)[Number(ev.key) - 1];
     if (k) { state.scene = k; panel.controls.scene.value = k; loadScene(); }
@@ -389,13 +390,17 @@ function drawTiers() {
   tierCanvas.style.display = tr ? 'block' : 'none';
   tierKey.style.display = tr ? 'block' : 'none';
   if (!tr) return;
+  const farKey = document.getElementById('tiersFar');
+  if (farKey) farKey.style.display = world.hf && world.hf.far ? '' : 'none';
   const [nw, nh] = tr.n;
   const B = world.sim.B;
   const fx = Math.round(camera.target[0] / B - tr.origin[0]), fz = Math.round(camera.target[2] / B - tr.origin[1]);
   // The whole map if it fits on 320 by 180 pixels with at least two pixels per column; else the
   // part of it around what the camera looks at.
-  const px = Math.max(Math.min(Math.floor(320 / nw), Math.floor(180 / nh), 6), 2);
-  const w = Math.min(nw, Math.floor(320 / px)), h = Math.min(nh, Math.floor(180 / px));
+  let px = Math.max(Math.min(Math.floor(320 / nw), Math.floor(180 / nh), 6), 2);
+  let w = Math.min(nw, Math.floor(320 / px)), h = Math.min(nh, Math.floor(180 / px));
+  // (a map of which less than half would show so, and that fits whole with one pixel per column, is shown whole)
+  if (w * h < 0.5 * nw * nh && nw <= 320 && nh <= 200) { px = 1; w = nw; h = nh; }
   const i0 = Math.min(Math.max(fx - (w >> 1), 0), nw - w), j0 = Math.min(Math.max(fz - (h >> 1), 0), nh - h);
   if (tierCanvas.width !== w || tierCanvas.height !== h) { tierCanvas.width = w; tierCanvas.height = h; }
   tierCanvas.style.width = `${w * px}px`;
@@ -406,7 +411,7 @@ function drawTiers() {
   for (let j = 0; j < h; j++) {
     for (let i = 0; i < w; i++) {
       const t = tr.tier[(j0 + j) * nw + i0 + i];
-      const c = t & 4 ? [224, 82, 77, 255] : t & 8 && (t & 3) ? [141, 111, 209, 255] : TIER_RGB[t & 3];
+      const c = t & 4 ? [224, 82, 77, 255] : t & 8 && (t & 3) ? [141, 111, 209, 255] : t & 16 ? [24, 52, 84, 255] : TIER_RGB[t & 3];
       // (z towards the viewer at the bottom, as the scenes are looked at)
       img.data.set(c, 4 * ((h - 1 - j) * w + i));
     }

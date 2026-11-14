@@ -245,6 +245,7 @@ uniform float uDry;
 uniform float uDx;        // cells per texel
 uniform float uSteep;
 uniform float uBreak;
+uniform float uFrontMin;  // ... and at least this high (cells)
 uniform float uFall;
 uniform float uFallMin;   // ... of water at least this deep on the lip
 uniform float uFallSpeed; // ... that runs over it at least this fast (cells per second)
@@ -253,7 +254,7 @@ void main() {
   ivec2 k = ivec2(gl_FragCoord.xy);
   ivec2 n = textureSize(uH, 0);
   float lo = 1.0e30, hi = -1.0e30, vmax = 0.0;
-  bool front = false, fall = false;
+  bool front = false, fall = false, soft = false;
   for (int j = 0; j < uPer; j++) {
     for (int i = 0; i < uPer; i++) {
       ivec2 t = k * uPer + ivec2(i, j);
@@ -289,7 +290,9 @@ void main() {
         // its ground and so above the level beside it: a step that is no front, and would keep
         // every bank solved. Solved water goes by what the solver finds in it (slotStats).
         bool mine = s.a < 0.5 && su.a < 0.5;
-        if (mine && !shore && step > uSteep * uDx && step > uBreak * before) front = true;
+        if (mine && !shore && step > uSteep * uDx && step > uBreak * before && step > uFrontMin) front = true;
+        // (half a front: counts as one where the view is, see SparseSim._hfPromote)
+        else if (mine && !shore && step > 0.5 * uSteep * uDx && step > 0.5 * uBreak * before && step > 0.5 * uFrontMin) soft = true;
         // The lip is the higher bed; its water runs down to a level below it. (Runs: the same
         // texel of a bank is no lip either, and its liquid goes nowhere.)
         float drop = abs(b.x - c.x);
@@ -301,7 +304,7 @@ void main() {
       }
     }
   }
-  o = vec4(lo, hi, (front ? 1.0 : 0.0) + (fall ? 2.0 : 0.0), vmax);
+  o = vec4(lo, hi, (front ? 1.0 : 0.0) + (fall ? 2.0 : 0.0) + (soft ? 4.0 : 0.0), vmax);
 }`;
 
   return S;

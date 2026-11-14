@@ -469,6 +469,121 @@ export const WORLD_SCENES = {
       };
     },
   },
+
+  // 13. An island, 60 m across, in a swell from the west. Cliffs over a shelf to the north-west
+  //     and a beach of 1 in 16 to the south-west, both open to the swell; a hill behind the
+  //     cliffs with a spring on it, whose stream runs down over ledges into a cove on the
+  //     sheltered side; things afloat in the cove. All the water lies on one map, and has it in
+  //     three ways, as each place needs: out at sea it is the swell, a formula; around the land
+  //     it is the height field's; and what a height field cannot hold is solved in 3D, wherever
+  //     it is. The view only decides who gets the solver when there is not enough of it.
+  island: {
+    title: 'Island',
+    blurb: 'An island in a swell from the west: cliffs and a beach on the weather side, a hill with a stream that falls over its ledges, and a cove in the lee with crates and balls afloat. Out at sea the water is the swell and nothing else, a formula. Around the island it is shallow water on a map. Where a map cannot hold it, it is solved in 3D, wherever that is: the surf on the beach and under the cliffs, the falls of the stream, the water around what floats while it moves. The solver map in the corner shows which is which. There is more surf than the solver has bricks for: what is nearest to the view gets them.',
+    build({ amp = 2.5, period = 6, flow = 600 } = {}) {
+      const sea = 40, deep = 30, half = 768;
+      const peak = [-80, -90], cove = [215, 62];
+      const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+      // 1 within w of the bearing a0 (radians), 0 from 0.35 further on
+      const sector = (th, a0, w) => 1 - ss(w, w + 0.35, Math.abs(wrap(th - a0)));
+      // the ground without the stream
+      const ground = (x, z) => {
+        const r = Math.hypot(x, z), th = Math.atan2(z, x);
+        const R = 300 + 34 * Math.cos(2 * th + 0.6) + 22 * Math.cos(3 * th - 1.1) + 8 * Math.cos(7 * th + 2);
+        const d = R - r;     // cells inland of the shore
+        // an ordinary shore: the bed falls away at 1 in 2, the land rises to 2.2 m
+        const o = d < 0 ? -deep * (1 - Math.exp(d / 60)) : 22 * (1 - Math.exp(-d / 30));
+        // cliffs: 3 m of rock over a shelf with 1 m of water on it, on which the swell breaks
+        const c = d < -8 ? -10 - (deep - 10) * ss(8, 70, -d) : d < 8 ? -10 + 40 * ss(-8, 8, d) : 30 + 6 * ss(8, 150, d);
+        // a beach of 1 in 16, dunes behind it
+        // (as far out as the water is 80 cm deep; from there the bed drops to that of the open sea)
+        const b = d < -128 ? -8 - (deep - 8) * ss(128, 210, -d) : d < 96 ? d / 16 : 6 + 14 * ss(96, 160, d);
+        const wc = sector(th, -2.35, 0.7), wb = sector(th, 2.3, 0.6);
+        let y = sea + o * (1 - wc - wb) + c * wc + b * wb;
+        // the hill
+        y += 62 * Math.pow(1 - ss(0, 260, Math.hypot(x - peak[0], z - peak[1])), 1.4) * ss(4, 70, d);
+        y += (2.2 * Math.sin(x / 23 + 1) * Math.sin(z / 31) + 1.2 * Math.sin(x / 11 - z / 13)) * ss(15, 90, d);
+        y += 0.8 * Math.sin(x / 37) * Math.sin(z / 41) * ss(0, 100, -d);
+        // the cove and its mouth, towards the east
+        const e = Math.hypot((x - cove[0]) / 80, (z - cove[1]) / 66);
+        const open = Math.max(1 - ss(0.72, 1.08, e), (1 - ss(30, 50, Math.abs(z - 78 - 0.1 * (x - cove[0])))) * ss(cove[0] + 10, cove[0] + 47, x));
+        const floor = sea - 12 - 6 * ss(260, 380, x);
+        return y - Math.max(y - floor, 0) * open;
+      };
+      // the stream: from the spring on the hill to the head of the cove
+      const way = [[-36, -66], [10, -70], [50, -30], [60, 15], [100, 38], [133, 50]];
+      const legs = [];
+      let total = 0;
+      for (let i = 1; i < way.length; i++) {
+        const a = way[i - 1], dx = way[i][0] - a[0], dz = way[i][1] - a[1], len = Math.hypot(dx, dz);
+        legs.push({ a, dx: dx / len, dz: dz / len, len, s0: total });
+        total += len;
+      }
+      // [distance from the stream, how far along it]
+      const along = (x, z) => {
+        let best = Infinity, s = 0;
+        for (const g of legs) {
+          const t = clamp((x - g.a[0]) * g.dx + (z - g.a[1]) * g.dz, 0, g.len);
+          const d = Math.hypot(x - g.a[0] - t * g.dx, z - g.a[1] - t * g.dz);
+          if (d < best) { best = d; s = g.s0 + t; }
+        }
+        return [best, s];
+      };
+      const point = (s) => { const g = legs.find((l) => s <= l.s0 + l.len) || legs[legs.length - 1]; return [g.a[0] + (s - g.s0) * g.dx, g.a[1] + (s - g.s0) * g.dz]; };
+      // Its bed is a flight of steps cut into the hillside, each `reach` cells long and level: as
+      // low as half a metre under the lowest ground along it, with a hollow of 30 cm in the
+      // middle that holds a pool. The stream falls from one to the next, as far as the hill
+      // drops in between: 2 m and more high on it, a hand's breadth near the cove.
+      const reach = 32, steps = [];
+      for (let k = 0, b = Infinity; k * reach < total; k++) {
+        let low = Infinity;
+        for (let s = k * reach; s <= Math.min((k + 1) * reach, total); s += 2) low = Math.min(low, ground(...point(s)) - 5);
+        b = Math.min(b - 1, low);
+        steps.push(b);
+      }
+      const bedAt = (s) => {
+        const k = Math.min(Math.floor(s / reach), steps.length - 1), u = s / reach - k;
+        return steps[k] - 3 * Math.sin(Math.PI * clamp(u, 0, 1)) ** 2;
+      };
+      // (and banks 1.2 m over it on either side, where the hill falls away below that: the
+      // stream crosses the slope in places, and what a fall throws up went down the hillside)
+      const height = (x, z) => {
+        const y = ground(x, z);
+        const [d, s] = along(x, z);
+        if (d >= 70) return y;
+        const b = bedAt(s), wall = 1.3 * Math.max(d - 4, 0);
+        const cut = Math.min(y, b + wall);
+        return y > sea + 2 && s < total - 1 ? Math.max(cut, b + Math.min(wall, 12, 30 - d)) : cut;
+      };
+      const ledges = steps.map((b, k) => [k * reach, k ? steps[k - 1] - b : 0]).filter(([, drop]) => drop > 4);
+      const spring = way[0];
+      const afloat = sea + 3;
+      return {
+        h: 0.1,
+        terrain: { origin: [-half - 64, -half - 64], spacing: 2, n: [half + 65, half + 65], height },
+        liquid: [],
+        heightfield: {
+          origin: [-half, -half], n: [half, half], cell: 2,
+          depth: (x, z, b) => Math.max(sea - b, 0),
+          sources: [{ box: [spring[0] - 6, spring[1] - 6, spring[0] + 6, spring[1] + 6], rate: flow / 144 }],
+          // (out at sea the water is the swell and nothing else: not solved, see HeightField.setFar)
+          sea: { level: sea, wave: { amp, period, depth: deep, dir: [1, 0], origin: [-half + 8, 0] }, far: { reach: 48, ramp: 128 } },
+        },
+        bodies: [
+          { shape: 'box', pos: [cove[0] - 12, afloat, cove[1] - 14], half: [5, 4, 5], round: 1, density: 0.45, color: 0, quat: quatY(0.4) },
+          { shape: 'box', pos: [cove[0] + 18, afloat, cove[1] + 14], half: [3.5, 3, 3.5], round: 1, density: 0.3, color: 1, quat: quatY(1.1) },
+          { shape: 'box', pos: [cove[0] + 26, afloat, cove[1] - 6], half: [9, 1.2, 4], round: 0.5, density: 0.5, color: 2, quat: quatY(-0.5) },
+          { shape: 'ball', pos: [cove[0] + 4, afloat, cove[1] - 20], radius: 4, density: 0.35, color: 3 },
+          { shape: 'ball', pos: [cove[0] - 22, afloat, cove[1] + 12], radius: 3, density: 0.4, color: 1 },
+        ],
+        // (the wash of the swell on a shore is the height field's; a breaker is not. What needs the
+        // solver gets it wherever it is; where there is more of that than the budget holds, the view decides.)
+        params: { hfFrontMin: 1.5, hfNear: 64, hfByView: 1, maxSolved: 1500 },
+        camera: { target: [20, sea + 12, 0], dist: 1050, yaw: 0.85, pitch: 0.52 },
+        marks: { sea, deep, half, cove, spring, peak, way, steps, ledges: ledges.map(([s, drop]) => [...point(s), drop]) },
+      };
+    },
+  },
 };
 
 // ---- hulls --------------------------------------------------------------------------------
