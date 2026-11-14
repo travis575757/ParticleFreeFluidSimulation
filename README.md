@@ -499,7 +499,10 @@ one-cell apron around every brick (10³ texels, half float), so that two hardwar
 fetches give a trilinear sample without looking anything up. A ray steps through the page
 table and skips empty space on three levels: groups of 16³ bricks, bricks, and the bounding
 box of the wet cells inside a brick. The terrain is traced directly from its height map.
-Density below the 0.5 surface is drawn as white haze ("Show spray").
+Density below the 0.5 surface is drawn as white haze ("Show spray"), unless it is the
+surface's own: what a ray meets within three cells of the surface it goes on to hit, and what
+has liquid a cell and a half below it, is the layer every surface of this solver has, not
+spray. (Counted as spray it was a grain all over solved water seen at a low angle.)
 
 **Measured** (Chrome 154, RTX 3090)
 
@@ -723,16 +726,32 @@ surface above rest and its rate of change.
 * *Solved water writes the map.* Where the brick that holds the surface is solved, the map
   takes h and dh/dt from the solver: the height at which ρ′ crosses 0.5 in each column, and
   the liquid's vertical velocity there. Over the last solved brick before water at rest the
-  two are blended, the solver's weight going from 1 to 0. That is where the solver damps
-  its waves anyway. A column in which the liquid ends at a solid has no surface, and counts
-  as water at rest. (Under a floating crate the liquid ends at its underside. Taken for the
-  surface, that was a dent two cells deep in the map for as long as the water around the
-  crate was solved, and a ring of waves out of nowhere when that water went back to rest.)
+  map is let go: the solver's weight falls from 1 to 0 over the inner half of that brick, and
+  in the outer half the map runs free. That is where the solver damps its waves anyway. A
+  column in which the liquid ends at a solid has no surface, and counts as water at rest.
+  (Under a floating crate the liquid ends at its underside. Taken for the surface, that was
+  a dent two cells deep in the map for as long as the water around the crate was solved, and
+  a ring of waves out of nowhere when that water went back to rest.) Nor has a column that
+  runs through the shell of a hull: what the solver holds there is the inside of a
+  compartment, dry or flooding. Taken for the surface, the compartments of the holed ship
+  left the map 0.06 cells low all round the solved water; it is within 0.007 now.
 * *The renderer draws both as one surface.* Water that is not solved is the plane of its
   level displaced by h, found by bracketing and regula falsi along the ray. Solved bricks
   are marched as before, with the density lookup shifted by the difference between the map
-  and the solver's surface, which is zero inside and grows over the blend, so the two
-  surfaces meet. Normals of the mapped water come from the slopes of h.
+  and the solver's surface, times a share that is zero inside and grows to one over the
+  whole of the last solved brick, so the two surfaces meet at its outer edge. Normals of the
+  mapped water come from the slopes of h. Those of solved water come from the heights of
+  its columns wherever the surface is a single sheet with nothing floating in it (the
+  gradient of the density is between half and twice the true slope, depending on where in
+  its cell the surface lies: terraces on every wave), from the gradient of the density
+  elsewhere, and they turn into the map's over the same last brick.
+* *The edge of the solved water is not to be seen.* It was, in most scenes, as a lip that
+  followed the bricks: the map was forced to the solver's surface right up to the last
+  texel, so whatever the two disagreed about showed there and nowhere else, and the normal
+  changed its source on the same line. With the outer half of the brick left to the map,
+  the share above and the normals that turn over, the slope of the surface across that edge
+  in the ship scene went from 0.0125 to 0.0005. A frame costs 0.05 to 0.2 ms more to draw
+  (788 × 600: the ship 0.93 → 1.08 ms, the surf 1.77 → 1.96 ms).
 * *The map is one-way.* The solver knows nothing of it: with and without the map its fields
   agree to the bit, and so do the books. Once no brick is solved and the map has calmed
   down (no wave above 0.02 cells or faster than 2.5e-3 cells per step) it is switched off,
@@ -748,7 +767,7 @@ after a minute; a ball of water dropped into the sea makes rings that run on bey
 solved bricks, the same along the axes of the bricks as along their diagonals (correlation
 0.99, heights within 7 %), although the solved region ends at different distances there.
 `tests/sea.html?scene=sea` checks what the map holds at the moment the last brick is dropped
-(rings of 0.11 cells on their way out and no dent where the crate floats) and that it is
+(rings of 0.12 cells on their way out and no dent where the crate floats) and that it is
 switched off before the minute is over.
 
 **A height field for water that moves** (`src/world/heightfield.js`, `src/shaders/heightfield.js`,

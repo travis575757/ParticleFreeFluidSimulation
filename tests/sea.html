@@ -234,8 +234,8 @@ try {
     check(sim.bricks === 0, `the sea is at rest again and nothing is stored (${sim.bricks} bricks left; the last one was dropped at step ${lastStored})`);
     // (the map of the surface carries the rings on after that, and is switched off once they are too low to see)
     if (sim.swell) {
-      // (0.08 cells without a lump, 0.13 to 0.14 with one, whose rings are younger; the underside of the crate taken for the surface: 2.2)
-      const most = lumpStep ? 0.3 : 0.12;
+      // (0.11 to 0.12 cells without a lump, more with one, whose rings are younger; the underside of the crate taken for the surface: 2.2)
+      const most = lumpStep ? 0.3 : 0.2;
       check(mapThen && mapThen[0] < most, `when the last brick was dropped the map of the surface held waves of ${mapThen ? mapThen[0].toFixed(3) : '?'} cells at the most (allowed ${most}: no dent where the crate floats)`);
       // (it takes the map about 26 s from there to calm down)
       const said = `in use until step ${lastMapped}; waves of ${sim.swell.peak[0].toExponential(1)} cells when last looked at`;

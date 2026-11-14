@@ -758,8 +758,10 @@ vec3 farVel(ivec3 c) {
 
 // The map of the surface of water that is not solved (src/world/swell.js), as the renderer reads it.
 export const SWELL = `
-uniform sampler2D uSwell;     // per texel: r = surface above rest (cells), g = that minus the surface of the solved
-                              // water there (if any), b and a = slope of the surface in x and z
+uniform sampler2D uSwell;     // per texel: r = surface above rest (cells), g = how far the surface drawn stands above
+                              // that of the solved water there (if any), b and a = slope of the surface in x and z
+uniform sampler2D uSwell2;    // per texel: r = share of the solver in the surface drawn (1 inside solved water, 0 at
+                              // its edge and beyond)
 uniform vec4 uSwellMap;       // world x and z of the map's corner, 1 / its width in cells, 1 if the map is in use
 uniform float uSwellAmp;      // no displacement is taken to be larger than this (cells)
 vec4 swellAt(vec2 xz) {
@@ -769,5 +771,13 @@ vec4 swellAt(vec2 xz) {
   vec4 s = textureLod(uSwell, uv, 0.0);
   s.rg = clamp(s.rg, vec2(-uSwellAmp), vec2(uSwellAmp));
   return s;
+}
+// how much of the surface at xz is the solved water's own: 1 well inside solved water (and where
+// there is no map), falling to 0 over the last brick before water that is not solved
+float swellOwn(vec2 xz) {
+  if (uSwellMap.w < 0.5) return 1.0;
+  vec2 uv = (xz - uSwellMap.xy) * uSwellMap.z;
+  if (uv.x <= 0.0 || uv.y <= 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return 1.0;
+  return textureLod(uSwell2, uv, 0.0).r;
 }
 `;

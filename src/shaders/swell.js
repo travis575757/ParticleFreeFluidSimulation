@@ -6,7 +6,7 @@
 // of a few texels does that for waves much longer than the stencil. So the map is stepped in
 // Fourier space, where each wave is turned by its own omega * dt exactly: transform, turn,
 // transform back, every step.
-import { header, FAR, TERRAIN, MAX_WATER } from './common.js';
+import { header, prims, FAR, TERRAIN, MAX_WATER } from './common.js';
 
 export const SWELL_REACH = 8;      // most rows above and below the level that are searched for the surface
 
@@ -96,10 +96,20 @@ void main() {
   // velocity there). Without the speed the map keeps one of its own under the solved water, the
   // one its waves would have, which has nothing to do with what the water does: a brick that
   // went to sleep let go of its surface with a kick. "Solved" is the brick that holds the top
-  // liquid row of the water at rest. The weight falls from 1 to 0 over the last brick before
-  // water that is not solved: there the solver damps its waves (spongeKeep) and the map carries
-  // them on.
-  //   oE: r = surface of the solved water above rest (cells), g = weight, b = 1 where there is water
+  // liquid row of the water at rest.
+  //
+  // Over the last brick before water that is not solved, two weights fall from 1 to 0:
+  //   how much the map takes from the solver (per step, so anything above a tenth is all of it):
+  //     over the inner half of that brick. In its outer half the map is left to itself: it
+  //     carries on what it was given further in.
+  //   how much of the surface drawn is the solver's: over the whole of that brick. What is drawn
+  //     there is a blend of the solver's surface and the map's, by place.
+  // (With one weight for both, over the whole brick, the map was the solver's surface up to
+  // the last texel, and all that the two differ by showed there: the solved water grows with
+  // the first crest of a wave, so its edge is where that crest stands, steep, with the damped
+  // water of the sponge behind it and the map's smoother wave in front. The edge was a line.)
+  //   oE: r = surface of the solved water above rest (cells), g = share of the solver in what is
+  //       drawn, b = 1 where there is water, a = 1 where that water is solved
   // The window is periodic to the transform; a band along its edge takes the waves out.
   S.slave = `${H}
 uniform Grid G;
@@ -112,6 +122,7 @@ uniform ivec2 uOrigin;     // world cell (x, z) of the corner of texel (0, 0)
 uniform int uReach;        // rows above and below the level in which the surface is looked for
 uniform float uBand;       // texels
 uniform float uLoss;       // share lost per step at the very edge
+${prims('H', true)}        // the hulls with their hollows filled (Hull.shellPrim)
 layout(location = 0) out vec4 oZ;
 layout(location = 1) out vec4 oE;
 const int CELL = ${cell};
@@ -137,7 +148,7 @@ bool solved(ivec3 b) {
 // let go of it as a ring of waves when that water went back to rest. Left to itself there, it
 // kept what the splash had left under the body, which cannot get out through the solved water
 // around it, and let go of that.)
-float columnSurface(ivec2 xz, int top, out float vy, out float ok) {
+float columnSurfaceIn(ivec2 xz, int top, out float vy, out float ok) {
   int j0 = top - uReach;
   float prev = 1.0, Vprev = 1.0;
   int by = -1000000, s = -1;
@@ -164,6 +175,15 @@ float columnSurface(ivec2 xz, int top, out float vy, out float ok) {
     Vprev = V;
   }
   return float(j0 + 2 * uReach + 2);
+}
+// Nor is what is found inside a hull a surface of the sea: the water in its compartments stands
+// where the holes let it, and a dry compartment has none. (Taken for the sea's, a dry hold was a
+// hole seven cells deep that the map kept filling: the sea around the ship stood 0.07 cells low
+// in the map, and the edge of the solved water showed as a line all the way round.)
+float columnSurface(ivec2 xz, int top, out float vy, out float ok) {
+  float y = columnSurfaceIn(xz, top, vy, ok);
+  if (ok > 0.5 && uHN > 0 && sdH(vec3(float(xz.x) + 0.5, y, float(xz.y) + 0.5)).x < 0.0) ok = 0.0;
+  return y;
 }
 void main() {
   ivec2 t = ivec2(gl_FragCoord.xy);
@@ -192,8 +212,9 @@ void main() {
   float fa = min(L.x - L.y, 1.0), fb = max(L.x - L.y - 1.0, 0.0);
   float rest = float(top) + 0.5 + (fa - 0.5) / (fa - fb);
   ivec3 bs = ivec3(c0.x >> LB, top >> LB, c0.y >> LB);
-  float w = 0.0, eta = 0.0, rise = 0.0;
+  float w = 0.0, own = 0.0, here = 0.0, eta = 0.0, rise = 0.0;
   if (solved(bs)) {
+    here = 1.0;
     vec2 f = xc - vec2(bs.xz * BS);
     float d = float(BS);
     for (int k = -1; k <= 1; k++) {
@@ -202,7 +223,8 @@ void main() {
         d = min(d, length(vec2(i < 0 ? f.x : i > 0 ? float(BS) - f.x : 0.0, k < 0 ? f.y : k > 0 ? float(BS) - f.y : 0.0)));
       }
     }
-    w = smoothstep(0.0, 1.0, d / float(BS));
+    w = smoothstep(0.5, 1.0, d / float(BS));
+    own = smoothstep(0.0, 1.0, d / float(BS));
     // (a column without a surface, under a body, counts as water at rest)
     for (int k = 0; k < CELL; k++) {
       for (int i = 0; i < CELL; i++) {
@@ -219,12 +241,15 @@ void main() {
   float e = max(1.0 - de / uBand, 0.0);
   float keep = 1.0 - uLoss * e * e;
   oZ = vec4(mix(z.x, eta, w) * keep, mix(z.y, rise, w) * keep, 0.0, 0.0);
-  oE = vec4(eta, w, 1.0, 0.0);
+  oE = vec4(eta, own, 1.0, here);
 }`;
 
-  // What the renderer reads, filtered linearly: r = h, g = how far the map's surface stands above
-  // that of the solved water under it (where there is such water; beside it, what its neighbours
-  // say, so that the filter has something to blend with), b and a = slope of h in x and z.
+  // What the renderer reads, filtered linearly: r = h, g = how far the surface that is drawn
+  // stands above that of the solved water (where there is such water: the map's share of the
+  // difference between the two; beside it, what its neighbours say, so that the filter has
+  // something to blend with), b and a = slope of h in x and z.
+  // In a second texture: r = the share of the solver in what is drawn (1 inside solved water, 0
+  // at its edge and beyond).
   S.show = `#version 300 es
 precision highp float;
 precision highp int;
@@ -232,21 +257,22 @@ precision highp sampler2D;
 uniform sampler2D uZ;
 uniform sampler2D uE;
 uniform float uInvCell;
-out vec4 o;
+layout(location = 0) out vec4 o;
+layout(location = 1) out vec4 o2;
 void main() {
   ivec2 t = ivec2(gl_FragCoord.xy);
   ivec2 n = textureSize(uZ, 0);
   float h = texelFetch(uZ, t, 0).r;
   vec4 e = texelFetch(uE, t, 0);
   float lift = 0.0;
-  if (e.g > 0.0) lift = h - e.r;
+  if (e.a > 0.5) lift = (1.0 - e.g) * (h - e.r);
   else {
     float s = 0.0, ws = 0.0;
     for (int k = -1; k <= 1; k++) {
       for (int i = -1; i <= 1; i++) {
         ivec2 q = clamp(t + ivec2(i, k), ivec2(0), n - 1);
         vec4 en = texelFetch(uE, q, 0);
-        if (en.g > 0.0) { s += texelFetch(uZ, q, 0).r - en.r; ws += 1.0; }
+        if (en.a > 0.5) { s += (1.0 - en.g) * (texelFetch(uZ, q, 0).r - en.r); ws += 1.0; }
       }
     }
     if (ws > 0.0) lift = s / ws;
@@ -254,6 +280,7 @@ void main() {
   float hx = texelFetch(uZ, min(t + ivec2(1, 0), n - 1), 0).r - texelFetch(uZ, max(t - ivec2(1, 0), ivec2(0)), 0).r;
   float hz = texelFetch(uZ, min(t + ivec2(0, 1), n - 1), 0).r - texelFetch(uZ, max(t - ivec2(0, 1), ivec2(0)), 0).r;
   o = vec4(h, lift, 0.5 * uInvCell * hx, 0.5 * uInvCell * hz);
+  o2 = vec4(e.g, 0.0, 0.0, 0.0);
 }`;
 
   // Each texel: the largest |h| and |v| of an 8 x 8 block of uSrc (r, g).

@@ -37,6 +37,7 @@ export class WorldRenderer {
     this.volRows = 0;
     // what the shaders read where a scene has no map of the surface (Swell)
     this.noSwell = { uSwell: glc.texture(1, 1, 'rgba16f', { linear: true }), uSwellMap: [0, 0, 0, 0], uSwellAmp: 0 };
+    this.noSwell.uSwell2 = this.noSwell.uSwell;
     glc.clear(this.noSwell.uSwell);
 
     // density of every stored brick with a border of one cell, tile by tile
@@ -122,6 +123,34 @@ float densIn(int s, vec3 l) {
 float densLifted(int s, vec3 l, vec3 org) {
   if (uSwellMap.w > 0.5) l.y -= swellAt(org.xz + l.xz).g;
   return densIn(s, l);
+}
+// Density at p (cells) next to the brick in slot s0 (corner org0): from that brick where p lies in
+// it or in its border, else from the brick p is in. Where that one is not solved: 0 above the
+// brick of s0 and 1 below it (air, and the water at rest), -1 beside it.
+float densNear(int s0, vec3 org0, vec3 p) {
+  vec3 l = p - org0;
+  if (all(greaterThanEqual(l, vec3(-0.5))) && all(lessThanEqual(l, vec3(float(BS) + 0.5)))) return densIn(s0, l);
+  ivec3 b = ivec3(floor(p / float(BS)));
+  int s = brickSlot(b);
+  if (s >= 0 && g_state < 1.5) return densIn(s, p - vec3(b * BS));
+  ivec3 b0 = ivec3(floor(org0 / float(BS) + 0.5));
+  if (b.xz != b0.xz) return -1.0;
+  return b.y > b0.y ? 0.0 : 1.0;
+}
+// How much liquid the column at xz holds in the five rows around the height yc (the middle of a
+// row): x = cells of it, y = 1 where the column is one that a height describes (full at the
+// bottom of the five rows, empty at the top), 0 where it is not or cannot be read.
+vec2 columnHeight(int s0, vec3 org0, vec2 xz, float yc) {
+  float sum = 0.0, lo = 0.0, hi = 0.0;
+  for (int k = -2; k <= 2; k++) {
+    float d = densNear(s0, org0, vec3(xz.x, yc + float(k), xz.y));
+    if (d < 0.0) return vec2(0.0);
+    d = min(d, 1.0);
+    if (k == -2) lo = d;
+    if (k == 2) hi = d;
+    sum += d;
+  }
+  return vec2(sum, smoothstep(0.7, 0.95, lo) * (1.0 - smoothstep(0.05, 0.3, hi)));
 }
 vec2 boxHit(vec3 ro, vec3 inv, vec3 lo, vec3 hi) {
   vec3 t0 = (lo - ro) * inv, t1 = (hi - ro) * inv;
@@ -303,14 +332,27 @@ float hfTrace(vec3 ro, vec3 rd, float ta, float tb, bool inside) {
 // (inside: in liquid); -1 if there is none before tEnd. Adds up the density met in air (mist)
 // and, with uOverlay, lines along the edges of the stored bricks the ray enters.
 // g_mapped: the place found is on water that is not solved (its surface is the map's).
+//
+// Density in the air is spray, except the little there is of it on every surface: between the
+// cell that is full and the one that is empty the density passes through everything below one
+// half. Two rules keep that out of the mist. Density with liquid a cell and a half below it is
+// the top of that liquid. And what is met in one stretch right up to the place where the ray
+// enters the liquid is kept apart (g_run, begun at g_runFrom): the caller counts it only where
+// the stretch is longer than a surface is thick. (One allowance for every surface, taken off
+// the sum, left a grain on all solved water that had moved: the sum is taken in steps, and came
+// out above the allowance for one pixel and below it for the next.)
 uniform int uOverlay;
 bool g_mapped = false;
+float g_run = 0.0, g_runFrom = 0.0;
 float crossing(vec3 ro, vec3 rd, float t0, float tEnd, bool inside, float jitter, inout float mist, inout vec4 lines) {
   vec3 inv = 1.0 / rd;
   float t = t0;
   float prev = inside ? 1.0 : 0.0;
   float amp = uSwellMap.w > 0.5 ? uSwellAmp : 0.0;
+  float run = 0.0, runFrom = t0;
   g_mapped = false;
+  g_run = 0.0;
+  g_runFrom = t0;
   for (int i = 0; i < 220; i++) {
     if (t >= tEnd) break;
     vec3 p = ro + rd * (t + 2.0e-3);
@@ -348,6 +390,8 @@ float crossing(vec3 ro, vec3 rd, float t0, float tEnd, bool inside, float jitter
       }
     }
     if (s < 0) {
+      mist += run;
+      run = 0.0;
       if (!stored && uHfMap.w > 0.5) {
         // nothing solved here: the water of the height field, if it has any in this block
         vec2 yr = hfRange(lo, size);
@@ -395,21 +439,35 @@ float crossing(vec3 ro, vec3 rd, float t0, float tEnd, bool inside, float jitter
       continue;
     }
     if (inside && tA > t + 1.0e-3) return t;
-    if (tA > t) prev = 0.0;
+    if (tA > t) { prev = 0.0; mist += run; run = 0.0; }
     float tt = tA + (i == 0 ? jitter * uStep : 0.0);
     float tStop = min(tB, tEnd);
     for (int k = 0; k < 48; k++) {
       float tn = min(tt + uStep, tStop);
-      float d = densLifted(s, ro + rd * tn - lo, lo);
-      if ((d > 0.5) != inside) return tt + (tn - tt) * clamp((0.5 - prev) / (d - prev), 0.0, 1.0);
-      if (!inside) mist += d * (tn - tt);
+      vec3 l = ro + rd * tn - lo;
+      float d = densLifted(s, l, lo);
+      if ((d > 0.5) != inside) {
+        g_run = run;
+        g_runFrom = runFrom;
+        return tt + (tn - tt) * clamp((0.5 - prev) / (d - prev), 0.0, 1.0);
+      }
+      if (!inside) {
+        if (d > 0.01) {
+          if (run <= 0.0) runFrom = tt;
+          if (densLifted(s, l - vec3(0.0, 1.5, 0.0), lo) < 0.5) run += d * (tn - tt);
+        } else {
+          mist += run;
+          run = 0.0;
+        }
+      }
       prev = d;
       tt = tn;
       if (tt >= tStop - 1.0e-4) break;
     }
-    if (tB < tOut) { if (inside) return tB; prev = 0.0; }
+    if (tB < tOut) { if (inside) return tB; prev = 0.0; mist += run; run = 0.0; }
     t = tOut;
   }
+  mist += run;
   if (!inside && uWaterN > 0) {
     // out of steps (a long way over stored bricks): what is left is the water at rest
     float te = waterEnter(ro, rd, inv, vec3(-1.0e9), vec3(1.0e9), t, tEnd);
@@ -529,12 +587,42 @@ vec3 liquidNormal(vec3 p, bool mapped) {
   }
   vec3 org = vec3(b * BS);
   vec3 l = p - org;
-  const float e = 0.5;
-  vec3 g = vec3(densLifted(s, l + vec3(e, 0.0, 0.0), org) - densLifted(s, l - vec3(e, 0.0, 0.0), org),
-                densLifted(s, l + vec3(0.0, e, 0.0), org) - densLifted(s, l - vec3(0.0, e, 0.0), org),
-                densLifted(s, l + vec3(0.0, 0.0, e), org) - densLifted(s, l - vec3(0.0, 0.0, e), org));
-  float n = length(g);
-  return n > 1.0e-5 ? -g / n : vec3(0.0, 1.0, 0.0);
+  float own = swellOwn(p.xz);
+  // Where the liquid lies as a layer (full below, empty above), its slope is that of the amount
+  // of liquid per column: the height of the water. The gradient of the density is not: between
+  // the middles of two rows the surface drawn rises at half to twice the rate the water does,
+  // row after row, and a gentle slope was lit in steps, one per cell of height. (Solved water
+  // had a grain that the water around it, drawn from a height, has not.) Elsewhere (spray, a
+  // wave that turns over, next to a body) the gradient is what there is.
+  bool lifted = own < 0.999;      // (the map moves the density only over the last solved brick)
+  float yc = floor(p.y - (lifted ? swellAt(p.xz).g : 0.0)) + 0.5;
+  const float ec = 1.0;
+  vec2 xa = columnHeight(s, org, p.xz - vec2(ec, 0.0), yc), xb = columnHeight(s, org, p.xz + vec2(ec, 0.0), yc);
+  vec2 za = columnHeight(s, org, p.xz - vec2(0.0, ec), yc), zb = columnHeight(s, org, p.xz + vec2(0.0, ec), yc);
+  float layer = min(min(xa.y, xb.y), min(za.y, zb.y));
+  if (layer > 0.0 && uSN > 0) layer *= smoothstep(1.5, 3.0, sdS(p).x);
+  vec3 nd = vec3(0.0, 1.0, 0.0);
+  if (layer > 0.0) {
+    vec2 sl = vec2(xb.x - xa.x, zb.x - za.x);
+    if (lifted) sl += vec2(swellAt(p.xz + vec2(ec, 0.0)).g - swellAt(p.xz - vec2(ec, 0.0)).g, swellAt(p.xz + vec2(0.0, ec)).g - swellAt(p.xz - vec2(0.0, ec)).g);
+    nd = normalize(vec3(-sl.x, 2.0 * ec, -sl.y));
+  }
+  if (layer < 0.999) {
+    const float e = 0.5;
+    vec3 g = vec3(densLifted(s, l + vec3(e, 0.0, 0.0), org) - densLifted(s, l - vec3(e, 0.0, 0.0), org),
+                  densLifted(s, l + vec3(0.0, e, 0.0), org) - densLifted(s, l - vec3(0.0, e, 0.0), org),
+                  densLifted(s, l + vec3(0.0, 0.0, e), org) - densLifted(s, l - vec3(0.0, 0.0, e), org));
+    float n = length(g);
+    nd = normalize(mix(n > 1.0e-5 ? -g / n : vec3(0.0, 1.0, 0.0), nd, layer));
+  }
+  // Over the last brick before water that is not solved the surface drawn is the map's (the
+  // density, moved to where the map has it), and so is its slope: the two sides of the edge are
+  // then lit by the same rule. (Only where the surface lies flat: spray is no part of the map.)
+  if (own < 0.999) {
+    vec4 m = swellAt(p.xz);
+    nd = normalize(mix(nd, normalize(vec3(-m.b, 1.0, -m.a)), (1.0 - own) * smoothstep(0.5, 0.9, nd.y)));
+  }
+  return nd;
 }
 // how much of the sun reaches p past the ground (obstacles and liquid cast no shadow)
 float groundShadow(vec3 p) {
@@ -608,9 +696,10 @@ void main() {
     float c = clamp(dot(-rd, n), 0.0, 1.0);
     float F = 0.02 + 0.98 * pow(1.0 - c, 5.0);
     col = F * sky(reflect(rd, n));
-    // the surface itself is not spray: between the cell that is full and the one that is empty
-    // the density passes through everything below 0.5, over a cell or two (seen along the normal)
-    mist = max(mist - 0.45 / max(c, 0.1), 0.0);
+    // (the density met right up to the surface is the surface, unless there is more of it than
+    // the three cells a surface is thick at the most: see crossing())
+    float skin = 3.0 / max(c, 0.15) + uStep, met = tw - g_runFrom;
+    if (!g_mapped && met > skin) mist += g_run * (1.0 - skin / met);
     // into the liquid: how far the refracted ray travels in it, and what it lands on
     vec3 rr = refract(rd, n, 1.0 / IOR);
     rr = normalize(rr + vec3(equal(rr, vec3(0.0))) * 1.0e-6);

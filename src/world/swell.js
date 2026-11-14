@@ -6,7 +6,7 @@
 // on deep water (src/shaders/swell.js). It is one-way: where water is solved the map takes the
 // solver's surface, and around it the map's waves run on from there; the solver knows nothing
 // of the map. The renderer draws water that is not solved with the map's surface, and blends
-// into it over the last solved brick.
+// into it over the last solved brick (the map runs free over the outer half of that brick).
 //
 // The map is a fixed window of n * cell cells per side. Waves that reach its edge are taken out.
 import { swellShaders, SWELL_REACH } from '../shaders/swell.js';
@@ -50,13 +50,14 @@ export class Swell {
     this.F = [glc.texture(n, n, 'rg32f'), glc.texture(n, n, 'rg32f')];   // work space of the transforms
     this.E = glc.texture(n, n, 'rgba32f');                     // what the solved water says (pass "slave")
     this.D = glc.texture(n, n, 'rgba16f', { linear: true });   // what the renderer reads (pass "show")
+    this.D2 = glc.texture(n, n, 'rgba16f', { linear: true });  // ... and the weight of the solved water
     this.M = [];
     for (let s = Math.ceil(n / 8); ; s = Math.ceil(s / 8)) { this.M.push(glc.texture(s, s, 'rg32f')); if (s === 1) break; }
     this.reset();
   }
 
   reset() {
-    for (const t of [this.Z, this.E, this.D]) this.glc.clear(t);
+    for (const t of [this.Z, this.E, this.D, this.D2]) this.glc.clear(t);
     this.active = false;
     this.peak = [0, 0];       // largest |h| and |v| when last looked at
     this._calm = 0;
@@ -66,7 +67,7 @@ export class Swell {
   /** For the shaders that read the map (SWELL in src/shaders/common.js). */
   get uniforms() {
     const p = this.params;
-    return { uSwell: this.D, uSwellMap: [this.origin[0], this.origin[1], 1 / (p.n * p.cell), this.active ? 1 : 0], uSwellAmp: p.amp };
+    return { uSwell: this.D, uSwell2: this.D2, uSwellMap: [this.origin[0], this.origin[1], 1 / (p.n * p.cell), this.active ? 1 : 0], uSwellAmp: p.amp };
   }
 
   /** The transform of `src` (sign -1) or its inverse without the factor 1 / n^2 (sign +1); returns the texture that holds it. */
@@ -98,10 +99,12 @@ export class Swell {
     const g = f === this.F[0] ? this.F[1] : this.F[0];
     glc.draw(P.propagate, g, { uF: f, uG: -sp.gravity[1] / sp.h, uDt: sp.dt, uCell: p.cell, uDepth: p.depth, uVisc: p.visc });
     f = this._fft(g, 1);
+    // (the hulls with their hollows filled: what is inside one is not the sea)
+    const shells = sim.solids.filter((s) => s.type === 'sdf').map((s) => ({ ...s, shell: true }));
     glc.draw(P.slave, [this.Z, this.E], {
-      ...sim._U(L0), ...sim._solidUniforms(), uZ: f, uLiq: L0.liq, uVel: sim.T.vel[0], uOrigin: this.origin, uReach: p.reach, uBand: p.band, uLoss: p.loss,
+      ...sim._U(L0), ...sim._solidUniforms(), ...sim._prims(shells, 'H'), uZ: f, uLiq: L0.liq, uVel: sim.T.vel[0], uOrigin: this.origin, uReach: p.reach, uBand: p.band, uLoss: p.loss,
     });
-    glc.draw(P.show, this.D, { uZ: this.Z, uE: this.E, uInvCell: 1 / p.cell });
+    glc.draw(P.show, [this.D, this.D2], { uZ: this.Z, uE: this.E, uInvCell: 1 / p.cell });
     if (sim.frame % 20 === 0) this._look(solved);
   }
 
@@ -135,6 +138,6 @@ export class Swell {
   }
 
   dispose() {
-    for (const t of [this.Z, ...this.F, this.E, this.D, ...this.M]) this.glc.deleteTexture(t);
+    for (const t of [this.Z, ...this.F, this.E, this.D, this.D2, ...this.M]) this.glc.deleteTexture(t);
   }
 }
