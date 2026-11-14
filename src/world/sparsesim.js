@@ -61,6 +61,7 @@ export const SPARSE_PARAMS = {
                      // region take the waves in. Pins always wake.
   evict: 1,          // ... and liquid that falls into the water gets the bricks it lands in by sending the calmest
                      // solved bricks to sleep in exchange: it splashes, whatever else is going on
+  evictOff: 0.125,   // ... but none whose liquid differs from the water at rest by more than this part of a brick
   rewake: 600,       // steps before moving water may wake the same brick again (pins and fast water always wake)
   pinHold: 120,      // steps a pinned brick stays solved after the pin has left it. A body that bobs moves the
                      // edge of its box across a brick boundary and back once per bob; without this the brick
@@ -1093,6 +1094,7 @@ export class SparseSim extends FluidSim {
     this.pins = [];                   // boxes of world cells ({ lo, hi }) in which water at rest is solved; set by the owner
     this._pinStamp = 0;
     this.pinOf = [];
+    this.editAt = [];                 // per level-0 slot: the frame at which a tool last changed its liquid (editLiquid with `tool`)
     this.calm = [];                   // per level-0 slot: steps it has been at rest
     this.drift = [];                  // ... and steps it has only drifted (see sleepSlow)
     this.wakingAt = [];               // per level-0 slot: the last report (its stamp) in which the brick had waking cells
@@ -1220,6 +1222,7 @@ export class SparseSim extends FluidSim {
     this.wakingAt[s] = 0;
     this.strongAt[s] = 0;
     this.pinOf[s] = 0;
+    this.editAt[s] = -Infinity;
     this.since[s] = this.frame;
     if (held) { set.setState(s, 2); this.nHeld++; this._heldDirty = true; }
     if (this.hfc) this.hfc.rebase = true;
@@ -1432,28 +1435,46 @@ export class SparseSim extends FluidSim {
 
   /**
    * As FluidSim.editLiquid, on the bricks the primitives touch only. `meter`: what the edit adds
-   * and removes goes into the ledger (see readLedger).
+   * and removes goes into the ledger (see readLedger). `tool`: the edit is the hand of the user
+   * (Pour, Drain). The bricks it changes are then kept solved as those under the brush are
+   * (pinHold), and with the budget of solved bricks used up the water they set in motion gets
+   * the bricks it reaches from the calmest water elsewhere (see _lifecycle).
    */
-  editLiquid(prims, op = 1, { meter = false } = {}) {
+  editLiquid(prims, op = 1, { meter = false, tool = false } = {}) {
     const { glc, prog: P, B } = this;
     if (!prims.length) return;
     this.stir();
     if (op === 1) this.ensurePrims(prims);
     // the cells an edit can change lie within half a cell of its primitives
     const boxes = prims.map((p) => this._primBox(p, 1));
-    if (this.nHeld) {
-      // an edit of water at rest wakes it (a held brick would take the edit back at the next step)
+    if (this.nHeld || (op === 2 && this.farOn)) {
+      // An edit of water at rest wakes it (a held brick would take the edit back at the next
+      // step). And water is taken out of water at rest that is not stored as well: left as it
+      // was, a brick of it stood in the hole that the edit made of the stored ones around it.
       const held = this.levels[0].set;
-      for (const { lo, hi } of boxes) {
+      const a = this.anchor;
+      boxes.forEach(({ lo, hi }, i) => {
+        // (of a ball: the bricks it reaches, not all of the box around it)
+        const p = prims[i], ball = p.type === 'ball' ? (p.radius + 1) ** 2 : -1;
         for (let z = Math.floor(lo[2] / B); z <= Math.floor((hi[2] - 1) / B); z++) {
           for (let y = Math.floor(lo[1] / B); y <= Math.floor((hi[1] - 1) / B); y++) {
             for (let x = Math.floor(lo[0] / B); x <= Math.floor((hi[0] - 1) / B); x++) {
               const t = held.get(x, y, z);
-              if (t >= 0 && held.state(t) === 2) this._activate(x, y, z);
+              if (t >= 0 ? held.state(t) !== 2 : op !== 2 || held.marked(x, y, z) || !this._farWet(x, y, z)) continue;
+              if (ball >= 0) {
+                let d2 = 0;
+                for (let d = 0; d < this.dim; d++) {
+                  const c = p.center[d] + a[d], b0 = [x, y, z][d] * B;
+                  const e = c < b0 ? b0 - c : c > b0 + B ? c - b0 - B : 0;
+                  d2 += e * e;
+                }
+                if (d2 > ball) continue;
+              }
+              this._activate(x, y, z);
             }
           }
         }
-      }
+      });
     }
     this._syncBricks();
     const T = this.T;               // (storing bricks may have replaced the pool textures)
@@ -1471,6 +1492,7 @@ export class SparseSim extends FluidSim {
       }
     }
     if (!slots.size) return;
+    if (tool) for (const s of slots) { this.editAt[s] = this.frame; this.pinOf[s] = this._pinStamp; }
     this.editList.set([...slots]);
     const U = this._prims(prims, 'L');
     const copy = (from, to) => glc.drawTiles(P.copyTiles, to, { uSrc: from }, this.editList, set.tile);
@@ -1701,7 +1723,7 @@ export class SparseSim extends FluidSim {
     const steps = Math.max(rep.steps, this.frame - rep.frame + p.reportEvery + 1);
     const far = NB_REACH * B;        // what the flags of the GPU cover
     const stamp = ++this._stamp;
-    const want = [], wake = [], hard = [], falls = [], dry = [], held = [], sleep = [];
+    const want = [], wake = [], hard = [], falls = [], urgent = [], urgentHard = [], dry = [], held = [], sleep = [];
     // (see stir)
     let stirred = !water || set.version !== this._stirVersion;
     const sum = { frame: rep.frame, wet: 0, dry: 0, held: 0, edge: 0, mass: 0, excess: 0, maxSpeed: 0, looked: 0, refused: 0 };
@@ -1768,11 +1790,13 @@ export class SparseSim extends FluidSim {
         // (fast liquid that is not of the sea, or in the brick over its surface: something is
         // falling in, or being thrown up)
         const falling = strong && !(fw && !this._overSurface(b[0], b[1], b[2]));
+        // (water that a tool has just changed: what it sets in motion comes before calm water elsewhere)
+        const tool = this.frame - this.editAt[s] < p.pinHold;
         each(b, Math.round(C[4 * s]), Math.round(C[4 * s + 1]), r, (x, y, z, t) => {
           if (t >= 0) { this.wakeOf[t] = stamp; if (strong) this.hardOf[t] = stamp; }
           if (t >= 0 ? set.state(t) === 2 : !set.marked(x, y, z)) {
             (strong ? hard : wake).push(x, y, z);
-            if (strong) falls.push(falling);
+            if (strong) { falls.push(falling); urgentHard.push(tool); } else urgent.push(tool);
           }
         });
       }
@@ -1805,6 +1829,12 @@ export class SparseSim extends FluidSim {
     // in like a wave at the edge, and counted). Not the fast water of the sea itself: its waves
     // would take the solved bricks along with them, further and further out, for as long as
     // they stay fast, which in 2D is a long time.
+    // The water around a brick that a tool has just changed (Pour, Drain: editAt) gets its
+    // bricks in the same way, and whenever it asks: the walls of a hole that was drained
+    // otherwise stood as bricks of water at rest until the budget had room for them.
+    // A brick that is far from the water at rest as a whole is never the one sent to sleep: held,
+    // it is filled with the water at rest on the spot. One that the Drain tool had emptied
+    // moves least of all, so it went first, and came back as a cube of water in the hole.
     let room = (p.maxSolved || (dim === 3 ? 3000 : 600)) - (set.count - this.nHeld);
     let calmest = null;
     const evict = () => {
@@ -1816,6 +1846,7 @@ export class SparseSim extends FluidSim {
           if (!rep.used[s] || !set.used[s] || set.state(s) === 2 || set.bx[s] !== rep.bx[s] || set.by[s] !== rep.by[s] || set.bz[s] !== rep.bz[s]) continue;
           if (this.strongAt[s] === stamp || this.hardOf[s] === stamp || this.pinOf[s] > this._pinStamp - p.pinHold) continue;
           if (!this._farWet(set.bx[s], set.by[s], set.bz[s]) || this._overSurface(set.bx[s], set.by[s], set.bz[s])) continue;
+          if (Math.abs(D[4 * s]) > p.evictOff * B ** dim) continue;
           calmest.push(s);
         }
         // the calmest last (taken from the end): first those no moving liquid reaches, then by speed
@@ -1849,9 +1880,10 @@ export class SparseSim extends FluidSim {
             // (too far from the view: the height field takes it in as it takes a wave)
             if (this._hfBeyond(x, z)) continue;
             const k = `${x},${y},${z}`;
-            if (list === wake && this.frame - (this.wokenAt.get(k) ?? -Infinity) < p.rewake) { sum.refused++; continue; }
+            const first = list === hard ? falls[i / 3] || urgentHard[i / 3] : urgent[i / 3];
+            if (list === wake && !first && this.frame - (this.wokenAt.get(k) ?? -Infinity) < p.rewake) { sum.refused++; continue; }
             // (a brick under the surface brings the one over it along: room for two)
-            while (room <= 0 && list === hard && falls[i / 3] && p.evict) { const n = evict(); if (!n) break; room += n; }
+            while (room <= 0 && first && p.evict) { const n = evict(); if (!n) break; room += n; }
             if (room <= 0) { sum.refused++; continue; }
             this.wokenAt.set(k, this.frame);
           } else if (water && this._hfOut(x, z)) continue;      // (air that is held, or stored held when liquid reaches it)

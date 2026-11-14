@@ -553,8 +553,8 @@ export class World {
     return true;
   }
 
-  pour(pos, vel, radius) { this.sim.editLiquid([{ type: 'ball', center: pos, radius, vel }], 1, { meter: true }); }
-  erase(pos, radius) { this.sim.editLiquid([{ type: 'ball', center: pos, radius }], 2, { meter: true }); }
+  pour(pos, vel, radius) { this.sim.editLiquid([{ type: 'ball', center: pos, radius, vel }], 1, { meter: true, tool: true }); }
+  erase(pos, radius) { this.sim.editLiquid([{ type: 'ball', center: pos, radius }], 2, { meter: true, tool: true }); }
 
   /**
    * The liquid that is unaccounted for, from the totals of SparseSim.books (cells of liquid;

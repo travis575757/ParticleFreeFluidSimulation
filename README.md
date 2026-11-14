@@ -735,6 +735,15 @@ the state of rest, and what a held brick took in. From these, per report:
   body and the brush still get their bricks, and so does liquid that falls into the water
   or is thrown up from it, by sending the calmest solved brick to sleep for each brick it
   needs: it splashes, whatever else is going on;
+* a brick that the Pour or the Drain tool has changed counts as one under the brush: it
+  stays solved for 120 steps, and with the budget used up the water it sets in motion gets
+  its bricks as falling water does. The Drain tool stores and solves the water at rest
+  inside its ball before it takes it out (only stored bricks were changed: on a sea at rest
+  the tool did nothing, and a brick that was not stored stood full in the hole the tool
+  made of those around it). And a brick whose liquid differs from the water at rest by more
+  than an eighth of a brick is never the one sent to sleep. A held brick is filled with the
+  water at rest; a brick the tool had just emptied moves least of all, went first, and
+  came back as a cube of water in the hole;
 * the brick over the surface is solved whenever the one below it is. (The level of these
   scenes is a quarter of a cell above a brick boundary, so the top quarter-row of the sea
   lies in a brick of its own. That brick has no cell with liquid above it, counted as at
@@ -865,6 +874,16 @@ it has to splash all the same (1059 bricks at the most) and leave nothing stored
 crate's waves hold the whole of a budget of 400 bricks: 119 of the calmest are sent to sleep
 and the splash gets its 28 (with `&p.evict=0` it gets none: the sea takes the ball in
 without a ripple and a patch of mist is left hanging over it).
+
+`tests/tools.html` (Chrome's numbers). On a sea of which nothing is stored one ball of the
+Drain tool, 10 cells with its middle 4 under the surface, takes out 3290 cells, the 3284
+of it under the surface within 3 %, and none of the 27 bricks it reaches is left at rest;
+the hole closes and the sea takes its bricks back. Four rounds of drops and holes on a
+budget of 400 bricks: of the 360 bricks the tool reached none is put back to rest within a
+second (9 before, the first in the step it was emptied). On the sea of the surf scene, a
+height field with nothing solved and the view 480 cells away, 30 steps of the tool take
+out 1734 cells; four seconds later the columns are the height field's again. The books
+balance in all three.
 
 **Waves beyond the solved water** (`src/world/swell.js`, `src/shaders/swell.js`)
 
@@ -1419,7 +1438,12 @@ Where these miss what was aimed at, and what else was found:
   per step: the solved region does not grow again for a second disturbance soon after the
   first unless that one is fast. (Its slow rings are carried by the map.)
 * Beyond the budget of 3000 solved bricks waves wake nothing more. Liquid that falls in then
-  gets the bricks of its splash and no others: the rings around it are the map's.
+  gets the bricks of its splash and no others: the rings around it are the map's. Where
+  solved water meets water at rest that could not be woken, the edge shows as the faces of
+  bricks: a film on a beach that ends in a straight line, a step in the surface around a
+  place that was drained. A few seconds of Pour and Drain use the budget up.
+* The Drain tool does nothing in the columns a height field keeps for its sources and links
+  (the wave maker of the surf, the mouths of a link): the 3D solver stays out of them.
 * A sleeping body stays exactly where it is until something wakes it, so a slow drift ends
   when it goes to sleep. Bodies float a little low: the balls up to 0.06 cells under
   their float lines, the crate of the harbour 0.11. That is where the solver has them, not

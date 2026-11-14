@@ -1,0 +1,174 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>Pour and Drain on water at rest (World.pour, World.erase, SparseSim.editLiquid)</title>
+<canvas id="c" width="64" height="64"></canvas>
+<script type="module">
+// The Drain tool takes water out of water at rest as well, and what it has emptied stays empty
+// until the water around it comes in.
+//   sea: a sea of which nothing is stored. One ball of the Drain tool takes out what lies inside
+//     it (it took nothing: only stored bricks were changed), no brick of the sea that the ball
+//     reaches is left as it was, the hole closes, the sea takes its bricks back and the books
+//     balance.
+//   budget: the same sea with a small budget of solved bricks (maxSolved), used up by drops and
+//     holes in turn, as someone playing with Pour and Drain uses it up. No brick that the Drain
+//     tool has reached is put back to rest within a second of it. (With the budget used up the
+//     solver sends its calmest brick to sleep for every brick that falling water needs. A brick
+//     that had just been emptied moves least of all: it went first, and a held brick is filled
+//     with the water at rest, so it stood in the hole as a cube of water.)
+//   map: water of a height field that is not solved (the sea of the surf scene, with the view
+//     480 cells away, as the app tells the world where it is): the Drain tool takes it out, the
+//     columns it worked on go back to the height field, and the books balance.
+//   ?only=sea|budget|map
+import { GLContext } from '../src/gl.js';
+import { World } from '../src/world/world.js';
+import { WORLD_SCENES } from '../src/world/scenes.js';
+
+const q = new URLSearchParams(location.search);
+const only = q.get('only');
+const log = (s) => console.log(s);
+let failed = 0;
+const check = (ok, what) => { if (!ok) failed++; log(`${ok ? 'PASS' : 'FAIL'}  ${what}`); };
+const pause = () => new Promise((r) => setTimeout(r));
+const e = (v, d = 1) => v.toExponential(d);
+
+try {
+  if (document.readyState !== 'complete') await new Promise((r) => window.addEventListener('load', r));
+  const glc = new GLContext(document.getElementById('c'));
+  log(`readback ${glc.readback} | ${glc.renderer}`);
+
+  const make = (scene, opts = {}) => {
+    const world = new World(glc, 3, scene, opts);
+    const sim = world.sim;
+    const W = { world, sim, step: 0, edge: 0, mass: 0, peak: 0, refused: 0 };
+    W.one = async (f) => {
+      if (f) f(W.step);
+      world.step();
+      await world.forcesReady;
+      W.step++;
+      if (sim.report) { W.edge += sim.report.edge; W.mass = Math.max(W.mass, sim.report.mass); W.refused += sim.report.refused; }
+      W.peak = Math.max(W.peak, sim.bricks - sim.nHeld);
+      if (W.step % 20 === 0) await pause();
+    };
+    W.run = async (n, f) => { for (let i = 0; i < n; i++) await W.one(f); };
+    W.until = async (most) => { for (let i = 0; i < most; i++) { await W.one(); if (world.resting) return true; } return false; };
+    // (as tests/rest.html: 1e-6 of the most liquid that was stored, and as much again for every second)
+    W.tol = () => (1e-6 + 1e-6 * W.step * sim.params.dt) * Math.max(W.mass, 1);
+    return W;
+  };
+  // the bricks of water at rest that a ball reaches with at least `inside` cells of its radius: [x, y, z] each
+  const reached = (sim, c, r, inside = 1) => {
+    const B = sim.B, an = sim.anchor, out = [];
+    const lo = c.map((v, d) => Math.floor((v - r + an[d]) / B)), hi = c.map((v, d) => Math.floor((v + r + an[d]) / B));
+    for (let z = lo[2]; z <= hi[2]; z++) for (let y = lo[1]; y <= hi[1]; y++) for (let x = lo[0]; x <= hi[0]; x++) {
+      let d2 = 0;
+      [x, y, z].forEach((v, d) => { const p = c[d] + an[d], b0 = v * B; const g = p < b0 ? b0 - p : p > b0 + B ? p - b0 - B : 0; d2 += g * g; });
+      if (d2 < (r - inside) ** 2 && sim._farWet(x, y, z)) out.push([x, y, z]);
+    }
+    return out;
+  };
+  const sea = () => { const s = WORLD_SCENES.sea.build(); s.bodies = []; return s; };
+
+  // ------------------------------------------------------------------ a sea of which nothing is stored
+  if (!only || only === 'sea') {
+    const W = make(sea());
+    const { world, sim } = W;
+    const level = world.scene.water[0].level, set = sim.levels[0].set;
+    await W.run(5);
+    const stored0 = sim.bricks;
+    // a ball of 10 cells with its middle 4 cells under the surface: what of it lies under the surface
+    const R = 10, down = 4, c = [3, level - down, -2];
+    const cap = Math.PI * (R - down) ** 2 * (3 * R - (R - down)) / 3;
+    const under = 4 / 3 * Math.PI * R ** 3 - cap;
+    world.erase(c, R);
+    const bricks = reached(sim, c, R);
+    const left = bricks.filter((b) => { const s = set.get(...b); return s < 0 || set.state(s) === 2; }).length;
+    await W.one();
+    sim.readLedger();
+    const removed = sim.removed;
+    check(stored0 === 0 && Math.abs(removed - under) <= 0.03 * under && left === 0,
+      `sea: with nothing stored (${stored0} bricks) one ball of the Drain tool takes out ${removed.toFixed(0)} cells, the ${under.toFixed(0)} of it that lie under the surface within 3 %; of the ${bricks.length} bricks of the sea it reaches, ${left} are left at rest`);
+    const rested = await W.until(3600);
+    const b = await world.balanceSettled();
+    check(rested && sim.bricks === 0 && Math.abs(b) <= W.tol() && W.edge === 0,
+      `the hole closes (${W.peak} bricks solved at the most), the sea takes its bricks back and the world is at rest after ${W.step} steps (${sim.bricks} bricks left); off by ${e(b)} cells of ${e(W.tol())} allowed; the liquid never reached the edge of the stored bricks (${W.edge})`);
+    world.dispose();
+  }
+
+  // ------------------------------------------------------------------ drops and holes with the budget used up
+  if (!only || only === 'budget') {
+    const budget = 400;
+    const W = make(sea(), { params: { maxSolved: budget } });
+    const { world, sim } = W;
+    const level = world.scene.water[0].level;
+    // bricks the Drain tool has reached, with the step it last did; and those of them put back to rest within 60 steps of it
+    const drained = new Map();
+    let refilled = 0, soonest = Infinity;
+    sim.onState = (x, y, z, what) => {
+      if (what !== 'sleep' || sim._overSurface(x, y, z)) return;
+      const at = drained.get(`${x},${y},${z}`);
+      if (at !== undefined && W.step - at <= 60) { refilled++; soonest = Math.min(soonest, W.step - at); }
+    };
+    // a round of 120 steps: five drops along a line for the first 40, then four holes of 20 steps each,
+    // the ball going down with the water as the pointer's does
+    const play = (i) => {
+      const t = i % 120, round = Math.floor(i / 120);
+      if (t < 40) {
+        if (t % 8 === 0) world.pour([-40 + 20 * (t / 8), level + 12, 6 * round], [0, -20, 0], 6);
+        return;
+      }
+      const k = Math.floor((t - 40) / 20), u = ((t - 40) - 20 * k) / 20;
+      const c = [-36 + 24 * k, level - 20 * Math.min(2 * u, 1), 6 * round], r = 12;
+      for (const b of reached(sim, c, r, 2)) drained.set(b.join(','), i);
+      world.erase(c, r);
+    };
+    await W.run(480, play);
+    check(sim.evicted > 0 && W.refused > 0 && W.peak >= budget,
+      `budget: four rounds of drops and holes use up a budget of ${budget} solved bricks (${W.peak} solved at the most; ${sim.evicted} bricks sent to sleep for falling water, ${W.refused} times water at rest was not woken)`);
+    check(refilled === 0,
+      `no brick that the Drain tool has reached is put back to rest within a second of it (${refilled} of ${drained.size} bricks${refilled ? `, the soonest after ${soonest} steps` : ''})`);
+    sim.onState = null;
+    const rested = await W.until(4800);
+    const b = await world.balanceSettled();
+    check(rested && sim.bricks === 0 && Math.abs(b) <= W.tol(),
+      `left alone, the sea comes to rest and takes its bricks back (${W.step} steps, ${sim.bricks} bricks left); off by ${e(b)} cells of ${e(W.tol())} allowed after ${sim.added.toFixed(0)} cells were poured in and ${sim.removed.toFixed(0)} taken out`);
+    world.dispose();
+  }
+
+  // ------------------------------------------------------------------ water of a height field that is not solved
+  if (!only || only === 'map') {
+    const scene = WORLD_SCENES.surf.build();
+    const W = make(scene);
+    const { world, sim } = W;
+    const level = scene.marks.sea;
+    // (the view is elsewhere: what is solved out here is solved for the tool alone)
+    world.setFocus([600, level + 2, 0], false);
+    await W.run(30);
+    const c = [120, level, 0], R = 6;
+    const B = sim.B, an = sim.anchor;
+    const bx = Math.floor((c[0] + an[0]) / B), bz = Math.floor((c[2] + an[2]) / B);
+    const solved0 = sim.bricks - sim.nHeld;
+    const b0 = await world.balanceSettled();
+    await W.run(30, () => world.erase(c, R));
+    const during = sim.bricks - sim.nHeld;
+    const b1 = await world.balanceSettled();
+    const removed = sim.removed;
+    // (each step the ball takes out what has come back into it: more than once the half of it under the surface)
+    const half = 2 / 3 * Math.PI * R ** 3;
+    check(!sim._hfLocked(bx, bz) && solved0 === 0 && removed > half && during > 0,
+      `map: on the sea of the surf scene, a height field with nothing solved (${solved0} bricks), 30 steps of the Drain tool take out ${removed.toFixed(0)} cells (the half of the ball under the surface holds ${half.toFixed(0)}); ${during} bricks are solved for it`);
+    await W.run(240);
+    const b2 = await world.balanceSettled();
+    const tol = 2e-5 * world.water0;
+    check(sim.bricks - sim.nHeld === 0 && Math.max(Math.abs(b0), Math.abs(b1), Math.abs(b2)) <= tol,
+      `four seconds later the columns are the height field's again (${sim.bricks - sim.nHeld} bricks solved); the books are off by ${e(b0)} cells before, ${e(b1)} after the tool and ${e(b2)} at the end, of ${e(tol)} allowed`);
+    world.dispose();
+  }
+
+  log(failed ? `${failed} check(s) failed` : 'all checks passed');
+} catch (err) {
+  console.log('ERROR ' + (err.stack || err));
+  window.__error = String(err);
+}
+window.__done = true;
+</script>
