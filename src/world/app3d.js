@@ -74,6 +74,17 @@ function loadScene(keepCamera = false) {
   if (!keepCamera) frameCamera();
   const blurb = document.getElementById('blurb');
   if (blurb) blurb.textContent = WORLD_SCENES[state.scene].blurb;
+  fitPanel();
+}
+
+// The boxes of the View section that do something in the scene that is loaded; the others are
+// left out. (All of them at once, under a long description of the scene, put the last ones
+// below the bottom of a window 700 pixels high, and a box that is not seen is not looked for.)
+function fitPanel() {
+  if (!panel) return;
+  const sim = world.sim;
+  const has = { tiers: !!world.hf, focus: !!world.hf, swell: !!sim.swell, foam: !!sim.foam };
+  for (const k in has) panel.controls[k].closest('label').style.display = has[k] ? '' : 'none';
 }
 
 function fitCanvas() {
@@ -261,18 +272,19 @@ function buildPanel() {
   P.section('View');
   P.checkbox('bricks', 'Show the stored bricks', state.overlay, (v) => { state.overlay = v; },
     'Outlines of the 8 x 8 x 8 cell bricks that are stored: blue where they hold liquid, amber where they hold water at rest that is kept but not solved, grey where they are kept as a margin.');
+  // (the next three are of some scenes only: fitPanel leaves out those that do nothing in the scene that is loaded)
+  P.checkbox('tiers', 'Show the solver map', state.tiers, (v) => { state.tiers = v; },
+    'Which solver has the water: a map of the scene\'s columns of bricks, seen from above, in the corner of the view. Blue: the height field alone. Amber: a copy of it stored next to solved water. Light: solved in 3D. Red: should be solved (a front, a fall) but the budget of solved bricks is used up. Violet: a source, a sink or the end of a link, which stays the height field\'s.');
+  P.checkbox('focus', 'Solve in 3D around the view target', state.focus, (v) => { state.focus = v; },
+    'In a scene with a height field, the water around the point the camera turns about is handed to the 3D solver, as far as the budget of solved bricks allows, and goes back to the height field when the view moves on. Off: only what a height field cannot hold is solved in 3D (fronts, falls, splashes, the water around bodies and the brush).');
+  P.checkbox('swell', 'Show the waves beyond the solved water', state.swell, (v) => { state.swell = v; },
+    'Where the water of a sea is not solved, a map of its surface carries the waves on. Off: the sea is drawn flat there, which is all the solver itself knows of it.');
   P.checkbox('mist', 'Show spray', state.mist, (v) => { state.mist = v; },
     'Density below the surface threshold of 0.5 (sheets and drops thinner than a cell) drawn as a white haze.');
   P.checkbox('detail', 'Ripples, sun glitter, wet shores', state.detail, (v) => { state.detail = v; },
     'Drawn on top of what is solved, for the eye only: ripples smaller than a cell, the sun on them, and the ground darker where it is wet. Off: the water and the ground as the solver has them.');
   P.checkbox('foam', 'Foam', state.foam, (v) => { state.foam = v; },
     'White on the water where it breaks: under a fall, in rapids, on a wave that goes over, around a splash. It is made, carried along and fades on a map of its own, for the eye only; the solver knows nothing of it.');
-  P.checkbox('swell', 'Show the waves beyond the solved water', state.swell, (v) => { state.swell = v; },
-    'Where the water of a sea is not solved, a map of its surface carries the waves on. Off: the sea is drawn flat there, which is all the solver itself knows of it.');
-  P.checkbox('focus', 'Solve in 3D around the view target', state.focus, (v) => { state.focus = v; },
-    'In a scene with a height field, the water around the point the camera turns about is handed to the 3D solver, as far as the budget of solved bricks allows, and goes back to the height field when the view moves on. Off: only what a height field cannot hold is solved in 3D (fronts, falls, splashes, the water around bodies and the brush).');
-  P.checkbox('tiers', 'Show who has the water', state.tiers, (v) => { state.tiers = v; },
-    'In a scene with a height field: a map of its columns of bricks, seen from above. Blue: the height field alone. Amber: a copy of it stored next to solved water. Light: solved in 3D. Red: should be solved (a front, a fall) but the budget of solved bricks is used up. Violet: a source, a sink or the end of a link, which stays the height field\'s.');
   P.select('rs', 'Render scale', [[0.5, '50 %'], [0.75, '75 %'], [1, '100 %']], state.renderScale, (v) => { state.renderScale = Number(v); });
 
   P.section('Storage');
@@ -368,7 +380,7 @@ function updateStats() {
   readouts.perf.textContent = `${world.resting ? 'at rest' : stepMs > 0 ? stepMs.toFixed(1) + ' ms' : '–'} · ${fps.toFixed(0)} fps`;
 }
 
-// The map of who has the water (World.tiers), one pixel per column of bricks, with a cross where the camera looks.
+// The solver map: who has the water (World.tiers), one pixel per column of bricks, with a cross where the camera looks.
 const tierCanvas = document.getElementById('tiers'), tierKey = document.getElementById('tiersKey');
 const TIER_RGB = [[0, 0, 0, 0], [47, 111, 163, 255], [232, 163, 61, 255], [127, 227, 245, 255]];
 function drawTiers() {
@@ -452,6 +464,7 @@ try {
   loadScene();
   fitCanvas();
   panel = buildPanel();
+  fitPanel();
   window.app = { state, camera, loadScene, stepOnce, renderer, holeAtPointer, get world() { return world; } };
   requestAnimationFrame(tick);
 } catch (e) {

@@ -998,7 +998,7 @@ in it a map cannot hold) and read back. A column is solved
 * where liquid falls into it, or liquid faster than 0.15 cells per step can reach it.
 
 Falls come first, then fronts, of each the nearest to the view target, and all of it within
-the budget of 3000 solved bricks. The inset map of the app ("Show who has the water") colours
+the budget of 3000 solved bricks. The inset map of the app ("Show the solver map") colours
 every column of bricks: the map's, a copy, solved, or flagged with no budget left.
 
 *When it goes back.* Not when it is at rest: a river never is. A column goes back after 120
