@@ -110,6 +110,45 @@ try {
   const off3 = Math.abs(s3.added - s3.removed - s3.freed - s3.mass) / s3.added;
   check('the books still balance', off3 < 1e-4, `off by ${off3.toExponential(1)}`);
 
+  // dig and raise, the pointer held still on the floor of the top basin: the ground goes down,
+  // or comes up, where the pointer's ray met it when the stroke began and nowhere else in
+  // particular (the middle of the brush does not crawl along the ray as the ground gives way
+  // under it), at 10 cells a second; and the water it stands in is all still there.
+  // (Where exactly the ray meets the ground is the app's business: from this view the rim of
+  // the basin hides part of its floor.)
+  const work = async (name, p, hold) => {
+    await tool(name);
+    const gs = await screen(p);
+    await page.mouse.move(...at(...gs));
+    await sleep(300);
+    await page.evaluate(() => { window.__ground0 = Float32Array.from(window.world.terrain.data); });
+    await drag(at(...gs), at(gs[0] + 0.002, gs[1]), 6, 'left', hold);
+    await sleep(100);
+    // the sample that has changed most, and where the app says the stroke was
+    const out = await page.evaluate(() => {
+      const t = window.world.terrain, d = t.data, d0 = window.__ground0;
+      let k = 0;
+      for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - d0[i]) > Math.abs(d[k] - d0[k])) k = i;
+      const j = Math.floor(k / 4 / t.n[0]), i = k / 4 - j * t.n[0];
+      return { x: t.origin[0] + i * t.spacing, z: t.origin[1] + j * t.spacing, by: d[k] - d0[k], spot: window.world.terrainSpot };
+    });
+    const ss = await screen(out.spot);
+    out.off = Math.hypot(out.x - out.spot[0], out.z - out.spot[2]);
+    out.aim = Math.hypot(ss[0] - gs[0], ss[1] - gs[1]);
+    out.text = `${Math.abs(out.by).toFixed(1)} cells at (${out.x}, ${out.z}), ${out.off.toFixed(1)} cells from the middle of the brush, which is ${(100 * out.aim).toFixed(1)} % of the view from the pointer`;
+    return out;
+  };
+  // (0.8 s and 1.6 s with the pointer down: 8 and 16 cells, less the frames the page did not get)
+  const dug = await work('dig', [14, floor0, 14], 1500);
+  check('dig tool digs into the ground under the pointer', dug.by < -8 && dug.off < 1.5 && dug.aim < 0.01, `down by ${dug.text}`);
+  await shot('dig');
+  const raised = await work('raise', [34, floor0, 12], 700);
+  const s4 = await stats();
+  check('raise tool raises the ground under the pointer', raised.by > 4 && raised.off < 1.5 && raised.aim < 0.01, `up by ${raised.text}`);
+  const off4 = Math.abs(s4.added - s4.removed - s4.freed - s4.mass) / s4.added;
+  check('the water is all still there', off4 < 1e-4, `off by ${off4.toExponential(1)}; ${await page.evaluate(() => window.world.terrainEdits)} strokes of the brush`);
+  await shot('raise');
+
   check('the app is still running', !(await page.evaluate(() => window.__error)), (await page.evaluate(() => window.__error || '')).slice(0, 600));
 
   // camera

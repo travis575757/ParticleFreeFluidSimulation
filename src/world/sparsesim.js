@@ -956,6 +956,26 @@ export class SparseSim extends FluidSim {
     this._resetHeld();
   }
 
+  /**
+   * The ground has been worked on (World.editTerrain). Over a height field the held bricks are
+   * copies of its water on the ground as it was: before the next step they are made anew on the
+   * ground as it is, or the step would hand the height field the difference between the two as
+   * if the solver had moved it. (With bodies of water at rest that difference is what the
+   * ground has pushed out, and the books have it: see _book.)
+   */
+  groundChanged() { this._groundMoved = true; }
+
+  _groundRefresh() {
+    this._groundMoved = false;
+    if (!this.hf) return;
+    this._lookNow = true;
+    if (!this.nHeld) return;
+    // (of the held bricks only: the solved ones go through the change of their capacity in the step)
+    this._only = this.heldList;
+    try { this._updateSolids(); } finally { this._only = null; }
+    this._resetHeld();
+  }
+
   /** Put the held bricks back to the state of the water at rest. */
   _resetHeld() {
     if (!this.nHeld) return;
@@ -1536,10 +1556,11 @@ export class SparseSim extends FluidSim {
     if (this.hfc && this.frame % 8 === 0) this._hfConfine();
     if (this.hfc && (this.hfc.rebase || this.hfc.tidy)) { this.hfc.tidy = false; this._hfTidy(); }
     this._syncBricks();
+    if (this._groundMoved) this._groundRefresh();
     super.step();
     if (this.swell) this.swell.step();
     if (this.foam) this.foam.step();
-    if (this.hf && this.frame % this.params.hfLook === 0) this._hfLook();
+    if (this.hf && (this.frame % this.params.hfLook === 0 || this._lookNow)) { this._lookNow = false; this._hfLook(); }
     if (this.params.lifecycle && this.frame % this.params.reportEvery === 0) this.makeReport();
   }
 

@@ -85,24 +85,43 @@ export class HeightField {
    */
   setBed(height, blocked = null, sub = 2) {
     const [nx, nz] = this.n;
-    const c = this.cell, data = new Float32Array(nx * nz * 4);
+    this._setBed(height, blocked || (() => false), sub, 0, 0, nx - 1, nz - 1);
+  }
+
+  /**
+   * The bed anew where the ground has changed: the texels that the box of cells [x0, z0, x1, z1]
+   * touches (their walls stay as they are). The water keeps its depth: it is lifted or let
+   * down with the ground, and runs from there.
+   */
+  setBedIn(height, box, sub = 2) {
+    const [nx, nz] = this.n, c = this.cell, o = this.origin;
+    const i0 = Math.max(Math.floor((box[0] - o[0]) / c), 0), i1 = Math.min(Math.floor((box[2] - o[0]) / c), nx - 1);
+    const j0 = nz > 1 ? Math.max(Math.floor((box[1] - o[1]) / c), 0) : 0, j1 = nz > 1 ? Math.min(Math.floor((box[3] - o[1]) / c), nz - 1) : 0;
+    if (i0 > i1 || j0 > j1) return;
+    this._setBed(height, null, sub, i0, j0, i1, j1);
+  }
+
+  /** blocked: null leaves the walls as they are. */
+  _setBed(height, blocked, sub, i0, j0, i1, j1) {
+    const [nx, nz] = this.n;
+    const c = this.cell, w = i1 - i0 + 1, data = new Float32Array(w * (j1 - j0 + 1) * 4);
     const sz = nz > 1 ? sub : 1;
-    for (let j = 0; j < nz; j++) {
-      for (let i = 0; i < nx; i++) {
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
         let sum = 0;
         for (let b = 0; b < sz; b++) {
           for (let a = 0; a < sub; a++) {
             sum += height(this.origin[0] + (i + (a + 0.5) / sub) * c, nz > 1 ? this.origin[1] + (j + (b + 0.5) / sz) * c : 0);
           }
         }
-        const k = j * nx + i;
+        const k = j * nx + i, q = (j - j0) * w + i - i0;
         this.bed[k] = sum / (sub * sz);
-        this.blocked[k] = blocked && blocked(...this.center(i, j)) ? 1 : 0;
-        data[4 * k] = this.bed[k];
-        data[4 * k + 1] = this.blocked[k];
+        if (blocked) this.blocked[k] = blocked(...this.center(i, j)) ? 1 : 0;
+        data[4 * q] = this.bed[k];
+        data[4 * q + 1] = this.blocked[k];
       }
     }
-    this.glc.upload(this.Bd, data);
+    this.glc.upload(this.Bd, data, i0, j0, w, j1 - j0 + 1);
   }
 
   /** The state: depth(x, z, bed) and, if given, velocity(x, z) => [u, w] at the low faces of each texel. */

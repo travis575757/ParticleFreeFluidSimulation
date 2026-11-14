@@ -216,6 +216,23 @@ export class BrickSet {
 
   marked(x, y, z) { return this.marks.has(key(x, y, z)); }
 
+  /**
+   * Forget the marks of the bricks in columns x0..x1, z0..z1 (what is solid there has changed),
+   * but for those of which still(x, y, z) is true. (A brick that still lies in the ground keeps
+   * its mark: to the liquid that stands on it, one without is the edge of what is stored.)
+   */
+  unmark(x0, x1, z0, z1, still = null) {
+    for (const k of [...this.marks]) {
+      const z = (k % M) - OFF, x = Math.floor(k / (M * M)) - OFF;
+      if (x < x0 || x > x1 || z < z0 || z > z1) continue;
+      const y = (Math.floor(k / M) % M) - OFF;
+      if (still && still(x, y, z)) continue;
+      this._setLeaf(x, y, z, -1);
+      this.marks.delete(k);
+      this.dirty = true;
+    }
+  }
+
   clearMarks() {
     for (const k of this.marks) {
       const z = (k % M) - OFF, y = (Math.floor(k / M) % M) - OFF, x = Math.floor(k / (M * M)) - OFF;

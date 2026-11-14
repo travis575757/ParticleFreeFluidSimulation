@@ -191,8 +191,8 @@ apps with synthetic mouse input (`2d|3d|world`). Both tools take
 `--browser chrome|firefox|librewolf`; `npm test` runs the interaction checks in Chrome,
 `npm run test:firefox` and `npm run test:librewolf` in the other two. The pages for world mode
 (`golden.html`, `sparse.html`, `world.html`, `held.html`, `sea.html`, `swell.html`,
-`heightfield.html`, `handover.html`, `hull.html`, `foam.html`) are described
-[there](#world-mode).
+`heightfield.html`, `handover.html`, `hull.html`, `foam.html`, `terrain.html`) are
+described [there](#world-mode).
 
 ## Where the paper leaves a choice open
 
@@ -403,11 +403,11 @@ what changes is where cells exist and what stands in for them where they do not.
 
 **What a scene fixes when it loads.** Nothing is compiled into the shaders or worked out
 beforehand. Which bricks exist and who has each column of water is decided anew every step,
-bodies wake and sleep, a hull is holed while it runs. Fixed at load, but as data the passes
-read every step and that only lacks a tool to change it: the heights of the ground (a
-texture), the level and extent of each water at rest, the bed, the sources, drains and links
-of a height field, the window of the surface map (512² texels around the scene's view target,
-one depth) and the swell of the surf scene. Fixed in the design: one cell size everywhere,
+bodies wake and sleep, a hull is holed and the ground is raised and dug while it runs. Fixed
+at load, but as data the passes read every step and that only lacks a tool to change it: the
+level and extent of each water at rest, the walls, sources, drains and links of a height
+field, the window of the surface map (512² texels around the scene's view target, one depth)
+and the swell of the surf scene. Fixed in the design: one cell size everywhere,
 ground without overhangs, pools and budgets allocated at the start.
 
 **Storage** (`src/world/bricks.js`, `src/world/sparsesim.js`)
@@ -494,6 +494,48 @@ the tiles of the bricks they touch only. They are metered on the GPU: the change
 cell is summed by three 8×8 reductions into a one-texel ledger. (Blending thousands of small
 per-cell changes straight into one float lost 1.5e-4 of them.) The app shows
 *in − out − stored*; the tests require in = stored + out + evaporated to 1e-5.
+
+**Ground that is worked on** (`Terrain.edit`, `World.editTerrain`; *Raise* and *Dig* in the
+app). Held down, the two tools move the ground under the pointer, under water too, by 10
+cells a second in the middle of a circle twice the brush across and by (1 − (r/R)²)² of that
+at r from it. A stroke stays in the level plane through the ground where it began. (Where
+the pointer's ray meets the ground itself moves as the ground does, towards the eye on
+ground that comes up and away from it in a pit, and the tool crawled along the ray.) A
+stroke rewrites the samples it touches and their slopes and uploads that rectangle of the
+texture. The solver needs nothing more: it reads the ground anew in the `solid` pass of
+every step, as it does a body that moves, so water over ground that comes up is pushed
+aside by the passes that keep it out of a hull, and runs into what is dug. Four things that
+were worked out earlier follow by hand. The bricks known to lie in the ground are looked at
+again around a stroke: those that still do stay known, the others are stored when water
+reaches them. The bed of a height field is averaged anew over the texels a stroke touches,
+and their water keeps its depth: it is lifted or let down with the ground and runs from
+there. The stored copies of that water beside the solved bricks are made anew for the
+ground as it is, in the step that follows. (Left for the next look at the map, they stood
+on the old ground for a few steps, and what they differed by from the map was entered as
+water that had crossed into them: 1.25 cells in the lake below.) Bodies asleep next to a
+stroke are woken. The ground stays within 24 cells below the lowest and 48 above the
+highest point the scene began with (no bricks are in sight beyond). The open sea of the
+crate and the buoys has no ground, and the tools do nothing there.
+
+`tests/terrain.html` (the numbers are Chrome's). `Terrain.edit` alone: the brush has the
+shape above (4.5e-7 cells off), the heights, slopes and bounds after a stroke are those of
+ground built like that from the start, and the texture is the samples. In a pool of 44,000
+cells solved in 3D a mound is raised from the floor to 4 cells above the water: the water
+stands 1.07 cells higher (the mound takes up 0.98), 6e-7 cells of liquid are left inside
+the mound, and after 14 s the books are off by 0.43 cells (1e-5 of the water). Then the
+mound is dug away and a pit 10 cells into the floor: the pit is full (density 0.997 at its
+bottom), the pool stands 0.66 cells lower than at first (the pit says 0.64), and after 26 s
+the books are off by 1.0 cell (2.3e-5); no liquid reached the edge of the stored bricks. A
+height field alone, its bed raised under the water: the water is lifted with it, runs off
+and is all still there (1.6e-7). A lake on a height field with bricks solved in it, the
+same mound and pit: the bed follows (1e-6 cells off), the lake stands 0.86 cells higher
+round the mound (0.92 expected) and 0.76 from where it began after the pit and 964 cells
+poured in (0.77 expected), and the books are off by 0.30 cells after 18 s and 0.88 after
+34 s (2e-5). Two things in these numbers are not the tool's. Sloshing water solved in 3D
+loses about 1e-6 of itself a second with the ground untouched (single precision; 2.5e-5
+after 25 s in the same pool), which is what the tolerances of this page allow for. And the
+levels expected in the lake include 717 and 939 cells that its dry shores owe: see the
+limits below.
 
 **Rendering** (`src/world/render3d.js`). The density is copied into a second pool with a
 one-cell apron around every brick (10³ texels, half float), so that two hardware-filtered
@@ -616,7 +658,8 @@ The app at 1280×800, drawing included, runs the cascade at 60 frames per second
 gives the same rates.
 
 `node tools/interact.mjs world` drives the app: bricks follow the water, the books balance,
-pour / drain / push act under the pointer and conserve what they should, every scene runs
+pour / drain / push act under the pointer and conserve what they should, the ground under
+the water of a basin is raised and dug away with the water all still there, every scene runs
 and keeps its books, the solved water of the surf scene follows the view target and what it
 leaves behind goes back to the map, a crate dropped with the crate tool lands in the sea.
 
@@ -1298,9 +1341,32 @@ Where these miss what was aimed at, and what else was found:
 * A standing jump or the foot of a fall changes hands a few times before it stays solved
   (twice as long each time): up to 14 changes of one brick in a minute at the foot of the
   river's fall, 6 to 9 in the other scenes.
-* The 3D solver loses about 1e-6 of the water it solves in 10 s (single precision). The
-  hand-overs themselves lose nothing, so the books of a scene on a map drift by that much of
+* The 3D solver loses between 1e-6 of the water it solves in 10 s (the scenes) and 1e-6 a
+  second (a pool that sloshes hard, `tests/terrain.html`), in single precision. A column
+  that changes hands loses nothing, so the books of a scene on a map drift by that much of
   the solved part only.
+* The books of a scene on a map close, and still a dry shore beside solved water makes
+  water. The stored copy of a dry texel shows the level of the wet texel next to it, so
+  that solved water meets no step at the waterline (`hfLevel`). What the solver draws out
+  of such a copy is entered as a debt of the dry texel, which has no water to pay it with:
+  the books count the debt, and the lake has that much more water than it began with.
+  Owed after 30 s of the scenes as the app runs them, in cells and as a share of the
+  scene's water: river 10,300 (7e-4), surf none, dam 1,000 (2e-4), cave 270 (3e-5), spring
+  960 (1.4e-3). With all the water solved that the budget allows, and no view target to
+  keep it near (`tests/world.html`): 25,600 (1.8e-3), 7,300 (8e-4), 40,300 (6.7e-3), 7,200
+  (7e-4) and 3,500 (5.2e-3); in the small lake of `tests/terrain.html`, with banks all
+  round, 720 to 940 cells or 1.6 to 2.1 %. With the copies of dry texels left dry the dam
+  owes 1,270 in place of 40,300, and the waterline has its step back. Not fixed: the debt
+  would have to be taken from a wet texel that is the map's alone, or the copies filled
+  with exactly what the lake has to give.
+* Over a map, liquid is reported at the edge of the stored bricks: wet cells on a face
+  towards a brick that is not stored, where the liquid meets a wall until that brick is.
+  Counted as cells times reports, in 30 s of the scenes as the app runs them: river 430,
+  surf 9,400, dam 390, cave 9,700, spring 2,600; in the small lake of `tests/terrain.html`
+  91 to 114, whether or not its ground is touched, at its sloping banks, where columns are
+  handed to the 3D solver. The scenes without a map report none. The books are not
+  affected. It was so before the work on the ground, which found it; the cause has not been
+  tracked down.
 * On a height field rigid bodies are tested with one case: a crate dropped on the lake of
   the spring scene comes to rest at its float line and goes to sleep (in `tools/interact.mjs
   world`). Bodies in a current, on swell or at a fall are not.

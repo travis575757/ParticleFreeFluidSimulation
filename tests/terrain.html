@@ -1,0 +1,341 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>ground that is raised and dug while the water runs (Terrain.edit, World.editTerrain)</title>
+<canvas id="c" width="64" height="64"></canvas>
+<script type="module">
+// The ground of a world can be worked on while it runs (the Raise and Dig tools of the app).
+//   Terrain.edit: the samples rise as the brush says and nowhere else, never past a limit; the
+//     slopes are those of ground built that way from the start; the texture is the samples.
+//   A pool solved in 3D: a mound raised in it becomes an island, the water it pushes aside is
+//     all still there and stands as much higher as the mound takes up; dug away again and on
+//     into the floor, the water fills the pit (bricks that lay in the ground are stored now).
+//   A height field on its own: its bed follows where it is told to, its walls stay, the water
+//     keeps its depth and is all still there after it has run off the new ground.
+//   A lake that a height field holds, in a world: the bed follows the ground; so does the
+//     water, in the height field and where a splash has it solved in 3D, and none is lost.
+//   ?only=edit|pool|bed|lake
+import { GLContext } from '../src/gl.js';
+import { World } from '../src/world/world.js';
+import { Terrain } from '../src/world/terrain.js';
+import { HeightField } from '../src/world/heightfield.js';
+
+const q = new URLSearchParams(location.search);
+const only = q.get('only');
+const log = (s) => console.log(s);
+let failed = 0;
+const check = (ok, what) => { if (!ok) failed++; log(`${ok ? 'PASS' : 'FAIL'}  ${what}`); };
+const pause = () => new Promise((r) => setTimeout(r));
+const trace = Number(q.get('trace') || 0);     // &trace=n: the books every n steps
+const e = (v, d = 1) => v.toExponential(d);
+const ss = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
+
+try {
+  if (document.readyState !== 'complete') await new Promise((r) => window.addEventListener('load', r));
+  const glc = new GLContext(document.getElementById('c'));
+  log(`readback ${glc.readback} | ${glc.renderer}`);
+  // (what LibreWolf reads back is noisy in its last bits)
+  const BIT = 2e-6;
+
+  // ------------------------------------------------------------------ the samples
+  if (!only || only === 'edit') {
+    const o = [-10, -6], s = 2, n = [40, 30];
+    const t = new Terrain(glc, 3, { origin: o, spacing: s, n, height: (x, z) => Math.fround(5 + 0.1 * x + 2 * Math.sin(0.2 * z)) });
+    const d0 = t.data.slice(), max0 = t.max;
+    // (on the highest ground there is, at the edge of the map: the bounds have to follow, and the brush is cut off)
+    const c = [61, 15], R = 9, A = 3;
+    const box = t.edit(c[0], c[1], R, A);
+    let off = 0, outside = 0, moved = 0, beyond = 0;
+    for (let j = 0; j < n[1]; j++) {
+      for (let i = 0; i < n[0]; i++) {
+        const k = 4 * (j * n[0] + i), x = o[0] + i * s, z = o[1] + j * s;
+        const qq = ((x - c[0]) ** 2 + (z - c[1]) ** 2) / (R * R);
+        const want = qq < 1 ? A * (1 - qq) ** 2 : 0;
+        off = Math.max(off, Math.abs(t.data[k] - d0[k] - want));
+        if (qq >= 1 && t.data[k] !== d0[k]) outside++;
+        if (t.data[k] !== d0[k] || t.data[k + 1] !== d0[k + 1] || t.data[k + 2] !== d0[k + 2]) {
+          moved++;
+          if (!box || x < box[0] || x > box[2] || z < box[1] || z > box[3]) beyond++;
+        }
+      }
+    }
+    check(off < 1e-5 && outside === 0, `a brush of ${R} cells raises the ground by ${A} cells in its middle, by (1 - (r/R)^2)^2 of that at r, and not at all beyond R (off by ${e(off)} at the most, ${outside} samples moved outside)`);
+    check(moved > 50 && beyond === 0, `the box it returns holds every sample whose height or slope is another (${moved} samples, ${beyond} outside the box ${box && box.join(', ')})`);
+    // ground built like this from the start
+    const at = (x, z) => t.data[4 * (Math.round((z - o[1]) / s) * n[0] + Math.round((x - o[0]) / s))];
+    const t2 = new Terrain(glc, 3, { origin: o, spacing: s, n, height: at });
+    let slope = 0;
+    for (let k = 0; k < t.data.length; k++) slope = Math.max(slope, Math.abs(t.data[k] - t2.data[k]));
+    check(slope === 0 && t.max === t2.max && t.min === t2.min && t.max > max0, `heights, slopes and bounds are those of ground built like this from the start (differ by ${e(slope)}; highest ${max0.toFixed(2)} -> ${t.max.toFixed(2)})`);
+    const tex = glc.read(t.tex);
+    let texOff = 0;
+    for (let k = 0; k < tex.length; k++) texOff = Math.max(texOff, Math.abs(tex[k] - t.data[k]));
+    check(texOff <= BIT * 40, `the texture the solver reads is the samples (differ by ${e(texOff)})`);
+    // limits
+    const top = t.max - 1, before = t.data.slice();
+    t.edit(c[0], c[1], R, 5, { hi: top });
+    let over = 0, sank = 0, rose = 0;
+    for (let k = 0; k < t.data.length; k += 4) {
+      if (t.data[k] > Math.max(before[k], top) + 1e-6) over++;
+      if (t.data[k] < before[k]) sank++;
+      if (t.data[k] > before[k]) rose++;
+    }
+    check(over === 0 && sank === 0 && rose > 10, `raised against a limit, no sample goes above it and none comes down (${rose} rose, ${over} above ${top.toFixed(2)}, ${sank} lower than before)`);
+    const b2 = t.data.slice();
+    const none = [t.edit(500, 500, R, 2), t.edit(c[0], c[1], 3, 2, { hi: 0 }), t.edit(c[0], c[1], 3, -2, { lo: 1e3 })];
+    let same = true;
+    for (let k = 0; k < b2.length; k++) if (b2[k] !== t.data[k]) same = false;
+    check(none.every((v) => v === null) && same, `off the map, or with the limit passed already, nothing changes and nothing is returned`);
+    // a profile (2D)
+    const p = new Terrain(glc, 2, { origin: [0, 0], spacing: 1, n: [64, 1], height: (x) => 4 + 0.05 * x });
+    const p0 = p.data.slice();
+    const pb = p.edit(30.5, 0, 6, -2);
+    let dug = 0, lowest = 0;
+    for (let i = 0; i < 64; i++) { if (p.data[4 * i] < p0[4 * i]) dug++; lowest = Math.min(lowest, p.data[4 * i] - p0[4 * i]); }
+    const pt = glc.read(p.tex);
+    let pOff = 0;
+    for (let k = 0; k < pt.length; k++) pOff = Math.max(pOff, Math.abs(pt[k] - p.data[k]));
+    check(dug === 12 && Math.abs(lowest + 2 * (1 - 0.25 / 36) ** 2) < 1e-5 && pb && pOff <= BIT * 10, `a profile is dug the same way: ${dug} samples, ${(-lowest).toFixed(3)} cells at the most, texture within ${e(pOff)}`);
+    glc.deleteTexture(t.tex); glc.deleteTexture(t2.tex); glc.deleteTexture(p.tex);
+  }
+
+  // the level at which ground(x, z) holds `volume` cells of water within the circle (cx, cz, r)
+  const levelOf = (ground, volume, [cx, cz, r]) => {
+    const hs = [];
+    for (let z = Math.floor(cz - r); z < cz + r; z++) for (let x = Math.floor(cx - r); x < cx + r; x++) if ((x + 0.5 - cx) ** 2 + (z + 0.5 - cz) ** 2 < r * r) hs.push(ground(x + 0.5, z + 0.5));
+    let lo = Math.min(...hs), hi = lo + 200;
+    for (let it = 0; it < 60; it++) {
+      const L = 0.5 * (lo + hi);
+      let v = 0;
+      for (const h of hs) v += Math.max(L - h, 0);
+      if (v > volume) hi = L; else lo = L;
+    }
+    return 0.5 * (lo + hi);
+  };
+  // a bowl: a level floor at 6, 30 cells round (48, 48), and banks that rise to 32 from there
+  const C = [48, 48], FLOOR = 6;
+  const bowl = (x, z) => FLOOR + 26 * ss(30, 44, Math.hypot(x - C[0], z - C[1]));
+  const terrain = { origin: [-8, -8], spacing: 1, n: [113, 113], height: bowl };
+  const RATE = 1 / 6;       // cells a step: the 10 cells a second of the app's tools
+  // What may be missing of the water after `steps` steps, as a part of it. The 3D solver loses
+  // about 1e-6 of the water it moves a second, in single precision, whether the ground is worked
+  // on or not: a pool like the one below that sloshes over ground nobody touches is 2.5e-5 short
+  // after 25 s (1.0e-6 a second, measured). One and a half times that is allowed.
+  const tol = (steps) => 1e-6 + 1.5e-6 * steps / 60;
+
+  // ------------------------------------------------------------------ a pool solved in 3D
+  if (!only || only === 'pool') {
+    const LEVEL = 18;
+    const world = new World(glc, 3, { h: 0.1, terrain, liquid: [{ type: 'box', center: [C[0], LEVEL / 2, C[1]], half: [47, LEVEL / 2, 47], vel: [0, 0, 0] }] });
+    const sim = world.sim, t = world.terrain;
+    const m0 = sim.measureSync().mass;
+    let edge = 0, worst = 0, peak = 0;
+    const run = async (steps, each = null) => {
+      for (let i = 0; i < steps; i++) {
+        if (each) each(i);
+        world.step();
+        if (sim.report) edge += sim.report.edge;
+        if (i % 30 === 29 || i === steps - 1 || (trace && i % trace === 0)) {
+          sim.readLedger();
+          const s = sim.measureSync();
+          worst = Math.max(worst, Math.abs(s.mass + sim.freedMass - m0) / m0 / tol(sim.frame));
+          peak = Math.max(peak, s.maxSpeed * sim.params.dt);
+          if (trace) log(`  . step ${sim.frame}: off ${(s.mass + sim.freedMass - m0).toFixed(3)} cells, freed ${sim.freedMass.toFixed(3)}, ${sim.bricks} bricks, ${sim.levels[0].set.marks.size} in the ground, edge ${edge}, fastest ${(s.maxSpeed * sim.params.dt).toFixed(2)}`);
+          await pause();
+        }
+      }
+    };
+    // the level of the pool: the liquid in columns of cells over the level floor, away from the middle
+    const a = sim.anchor;
+    const level = () => {
+      const n = [4, 44, 1], d = glc.read(sim.resolve(sim.T.rho[0], [C[0] - 26 + a[0], FLOOR + a[1], C[1] + a[2]], n));
+      let sum = 0;
+      for (let k = 0; k < n[0] * n[1]; k++) sum += d[4 * k];
+      return FLOOR + sum / n[0];
+    };
+    // the liquid in the cells of column (x, z) that lie a cell or more inside the ground
+    const buried = (x, z) => {
+      const n = [1, 48, 1], d = glc.read(sim.resolve(sim.T.rho[0], [x + a[0], a[1], z + a[2]], n)), g = t.height(x + 0.5, z + 0.5);
+      let sum = 0;
+      for (let y = 0; y < n[1]; y++) if (y + 1 < g - 1) sum += d[4 * y];
+      return sum;
+    };
+    const POOL = [C[0], C[1], 46];
+    const ground = (x, z) => t.height(x, z);
+    await run(240);
+    const L0 = level(), P0 = levelOf(ground, m0, POOL), bricks0 = sim.bricks;
+    log(`3D pool: ${m0.toFixed(0)} cells of water in ${bricks0} bricks; level ${L0.toFixed(3)} (${P0.toFixed(3)} by the ground and the amount)`);
+    check(Math.abs(L0 - P0) < 0.3, `the pool stands where its ground and the amount of water say (${L0.toFixed(2)} against ${P0.toFixed(2)})`);
+    // a mound in the middle, to above the water
+    const R = 16, UP = 96;
+    await run(UP, () => world.editTerrain([C[0], 0, C[1]], R, RATE));
+    await run(480);
+    const L1 = level(), P1 = levelOf(ground, m0, POOL), top = t.height(C[0], C[1]);
+    const in1 = Math.max(buried(C[0], C[1]), buried(C[0] + 5, C[1] - 3), buried(C[0] - 8, C[1] + 6));
+    check(top > L1 + 1 && Math.abs((L1 - L0) - (P1 - P0)) < 0.15, `a mound raised in it to ${top.toFixed(1)} is an island, and the water stands ${(L1 - L0).toFixed(2)} cells higher: what the mound takes up says ${(P1 - P0).toFixed(2)}`);
+    check(in1 < 0.02, `no liquid is left in the ground under the mound (${e(in1)} cells in three columns of it)`);
+    const off1 = Math.abs(sim.measureSync().mass + sim.freedMass - m0);
+    check(worst < 1 && edge === 0, `all the water is still there: off by ${off1.toFixed(2)} cells (${e(off1 / m0)}) after ${(sim.frame * sim.params.dt).toFixed(0)} s, ${(100 * worst).toFixed(0)} % at the most of what the solver's own drift is allowed; the liquid never reached the edge of the stored bricks (${edge})`);
+    // away again, and on into the floor
+    const DOWN = UP + 60, marks0 = sim.levels[0].set.marks.size;
+    await run(DOWN, () => world.editTerrain([C[0], 0, C[1]], R, -RATE));
+    await run(600);
+    const L2 = level(), P2 = levelOf(ground, m0, POOL), pit = t.height(C[0], C[1]);
+    const d = glc.read(sim.resolve(sim.T.rho[0], [C[0] + a[0], Math.floor(pit) + 1 + a[1], C[1] + a[2]], [1, 4, 1]));
+    check(pit < FLOOR - 8 && d[0] > 0.99 && d[4] > 0.99 && Math.abs((L2 - L0) - (P2 - P0)) < 0.15,
+      `dug away and ${(FLOOR - pit).toFixed(1)} cells into the floor, the pit is full of water (density ${d[0].toFixed(3)} at its bottom) and the pool stands ${(L0 - L2).toFixed(2)} cells lower than at first: the pit says ${(P0 - P2).toFixed(2)}`);
+    const off2 = Math.abs(sim.measureSync().mass + sim.freedMass - m0);
+    check(worst < 1 && edge === 0, `all the water is still there: off by ${off2.toFixed(2)} cells (${e(off2 / m0)}) after ${(sim.frame * sim.params.dt).toFixed(0)} s, ${(100 * worst).toFixed(0)} % at the most of what is allowed; the liquid never reached the edge of the stored bricks (${edge}); ${sim.bricks} bricks (${bricks0} at first), ${marks0} -> ${sim.levels[0].set.marks.size} known to lie in the ground`);
+    log(`  fastest liquid ${peak.toFixed(2)} cells per step`);
+    world.dispose();
+  }
+
+  // ------------------------------------------------------------------ a height field on its own
+  if (!only || only === 'bed') {
+    const n = [96, 64], cell = 2;
+    const hf = new HeightField(glc, { origin: [0, 0], n, cell, gravity: 100, params: { sync: 1 } });
+    const rough = (x, z) => 4 + 3 * Math.sin(x * 0.07) * Math.cos(z * 0.09);
+    const wall = (x, z) => x > 150 && x < 156 && z > 40;
+    hf.setBed(rough, wall);
+    hf.fill(12);
+    const v0 = hf.volume(), s0 = hf.read(), bed0 = hf.bed.slice(), blocked0 = hf.blocked.slice();
+    const hump = (x, z) => rough(x, z) + 5 * Math.exp(-((x - 120) ** 2 + (z - 60) ** 2) / 300);
+    const box = [90, 30, 150, 90];
+    hf.setBedIn(hump, box);
+    const s1 = hf.read(), Bd = glc.read(hf.Bd);
+    let inside = 0, outside = 0, depth = 0, walls = 0, tex = 0, mean = 0;
+    for (let j = 0; j < n[1]; j++) {
+      for (let i = 0; i < n[0]; i++) {
+        const k = j * n[0] + i;
+        const touched = (i + 1) * cell > box[0] && i * cell <= box[2] && (j + 1) * cell > box[1] && j * cell <= box[3];
+        let m = 0;
+        for (let b = 0; b < 2; b++) for (let aa = 0; aa < 2; aa++) m += (touched ? hump : rough)((i + (aa + 0.5) / 2) * cell, (j + (b + 0.5) / 2) * cell) / 4;
+        mean = Math.max(mean, Math.abs(hf.bed[k] - m));
+        if (touched && hf.bed[k] !== bed0[k]) inside++;
+        if (!touched && hf.bed[k] !== bed0[k]) outside++;
+        depth = Math.max(depth, Math.abs(s1.h[k] - s0.h[k]));
+        if (hf.blocked[k] !== blocked0[k] || Math.abs(Bd[4 * k + 1] - blocked0[k]) > BIT) walls++;
+        tex = Math.max(tex, Math.abs(Bd[4 * k] - hf.bed[k]));
+      }
+    }
+    check(inside > 500 && outside === 0 && mean < 1e-5 && tex <= BIT * 20, `the bed is the new ground in the texels the box touches (${inside} changed, off by ${e(mean)}) and what it was elsewhere (${outside} changed); its texture follows (within ${e(tex)})`);
+    check(walls === 0 && depth <= BIT * 20 && Math.abs(hf.volume() - v0) <= 1e-6 * v0, `walls and depths are what they were (${walls} walls changed, depths within ${e(depth)}): the water is lifted with the ground, ${e((hf.volume() - v0) / v0)} of it lost`);
+    let low = 0;
+    for (let i = 0; i < 1200; i++) { hf.step(1 / 60); if (i % 200 === 199) await pause(); }
+    const s2 = hf.read();
+    for (let k = 0; k < s2.h.length; k++) low = Math.min(low, s2.h[k]);
+    check(Math.abs(hf.volume() - v0) <= 2e-6 * v0 && low >= 0, `after 20 s it has run off the hump and all is still there (${e((hf.volume() - v0) / v0)}; no depth below zero: ${e(low)})`);
+    hf.dispose();
+  }
+
+  // ------------------------------------------------------------------ a lake of a height field, in a world
+  if (!only || only === 'lake') {
+    const LEVEL = 18, cell = 2, n = [48, 48];
+    const world = new World(glc, 3, { h: 0.1, terrain, liquid: [], heightfield: { origin: [0, 0], n, cell, depth: (x, z, bed) => LEVEL - bed } });
+    const sim = world.sim, hf = world.hf, t = world.terrain;
+    const blocked0 = hf.blocked.slice();
+    let edge = 0, worst = 0, solved = 0, last = 0;
+    const books = async () => { const b = await world.balanceSettled(); last = b; worst = Math.max(worst, Math.abs(b) / world.water0 / tol(sim.frame)); return b; };
+    const run = async (steps, each = null) => {
+      for (let i = 0; i < steps; i++) {
+        if (each) each(i);
+        world.step();
+        if (sim.report) edge += sim.report.edge;
+        solved = Math.max(solved, sim.bricks - sim.nHeld);
+        // (the level: every 5 steps of the last 840 of a run)
+        if (steps - i <= 840 && i % 5 === 4) levels.push(level());
+        if (i % 30 === 29 || i === steps - 1 || (trace && i % trace === 0)) {
+          const b = await books();
+          if (trace) log(`  . step ${sim.frame}: off ${b.toFixed(3)} cells, ${sim.bricks} bricks (${sim.nHeld} held), edge ${edge}`);
+          await pause();
+        }
+      }
+    };
+    // The level of the lake: bed + depth of the wet texels inside the banks. A height field has
+    // no friction, and a lake in a bowl that has had a mound raised in it sloshes for minutes,
+    // by half a cell and more: the mean of the samples taken while it runs (see run), over
+    // several of its periods, is what stands for the level.
+    const M = [C[0] + 12, C[1]], D = [C[0] - 6, C[1] + 16];
+    const level = () => {
+      const s = hf.read();
+      let sum = 0, cnt = 0;
+      for (let j = 0; j < n[1]; j++) for (let i = 0; i < n[0]; i++) {
+        const [x, z] = hf.center(i, j), k = j * n[0] + i;
+        if (Math.hypot(x - C[0], z - C[1]) < 30 && s.h[k] > 0.05) { sum += hf.bed[k] + s.h[k]; cnt++; }
+      }
+      return sum / cnt;
+    };
+    let levels = [];
+    const meanLevel = () => levels.reduce((a, b) => a + b, 0) / levels.length;
+    // What the texels of the height field owe: water the solver has taken out of the copies of
+    // dry texels at a shore, which show the water of the texel next to them (hfLevel() in
+    // src/shaders/common.js), and that no texel has given. The books count it against the
+    // lake; the depths of the lake hold it. It comes of the hand-over at a shore and not of the
+    // ground that is worked on (README, "Limits of world mode as it stands"): the level is compared with what the
+    // ground says for the water there is and this.
+    const owed = () => {
+      const X = glc.read(hf.X[0]);
+      let sum = 0;
+      for (let k = 0; k < X.length; k += 4) if (X[k] < 0) sum -= X[k] * hf.area;
+      return sum;
+    };
+    const swing = () => (Math.max(...levels) - Math.min(...levels)) / 2;
+    const bedOff = () => {
+      const Bd = glc.read(hf.Bd);
+      let off = 0, tex = 0, walls = 0;
+      for (let j = 0; j < n[1]; j++) for (let i = 0; i < n[0]; i++) {
+        const k = j * n[0] + i;
+        let m = 0;
+        for (let b = 0; b < 2; b++) for (let aa = 0; aa < 2; aa++) m += t.height((i + (aa + 0.5) / 2) * cell, (j + (b + 0.5) / 2) * cell) / 4;
+        off = Math.max(off, Math.abs(hf.bed[k] - m));
+        tex = Math.max(tex, Math.abs(Bd[4 * k] - hf.bed[k]));
+        if (hf.blocked[k] !== blocked0[k]) walls++;
+      }
+      return { off, tex, walls };
+    };
+    await run(60);
+    const v0 = world.water0, L0 = meanLevel(), POOL = [C[0], C[1], 46], ground = (x, z) => t.height(x, z);
+    const P0 = levelOf(ground, v0, POOL);
+    log(`lake of a height field: ${v0.toFixed(0)} cells of water, ${sim.bricks} bricks; level ${L0.toFixed(3)} (${P0.toFixed(3)} by the ground and the amount)`);
+    // a mound off the middle, to above the water
+    const R = 14;
+    await run(96, () => world.editTerrain([M[0], 0, M[1]], R, RATE));
+    const b1 = bedOff();
+    check(b1.off < 1e-5 && b1.tex <= BIT * 40 && b1.walls === 0, `the bed of the height field is the ground as it is now (off by ${e(b1.off)}, its texture within ${e(b1.tex)}; ${b1.walls} walls changed)`);
+    levels = [];
+    await run(900);
+    const owed1 = owed();
+    const L1 = meanLevel(), P1 = levelOf(ground, v0 + owed1, POOL), top = t.height(M[0], M[1]);
+    const dry = hf.read().h[Math.floor(M[1] / cell) * n[0] + Math.floor(M[0] / cell)];
+    check(top > L1 + 1 && dry < 0.05 && Math.abs((L1 - L0) - (P1 - P0)) < 0.15, `a mound raised to ${top.toFixed(1)} is an island (${dry.toFixed(3)} cells of water on it) and the lake stands ${(L1 - L0).toFixed(2)} cells higher (the mean of 14 s, in which it sloshes by ${swing().toFixed(2)}): what the mound takes up, and the ${owed1.toFixed(0)} cells its shores owe, say ${(P1 - P0).toFixed(2)} (the mound alone ${(levelOf(ground, v0, POOL) - P0).toFixed(2)})`);
+    check(worst < 1, `no water lost or gained: off by ${Math.abs(last).toFixed(2)} cells (${e(Math.abs(last) / v0)}) after ${(sim.frame * sim.params.dt).toFixed(0)} s, ${(100 * worst).toFixed(0)} % at the most of what the solver's own drift is allowed; ${solved} bricks solved at the most`);
+    // (Not a check here: where the wave of the mound reaches the banks the solver takes columns
+    // over, and its next report counts liquid of theirs at bricks further up the bank that are
+    // not stored yet. That is the hand-over at a shore that slopes, not the ground that is
+    // worked on: the same lake with a hump of water in it and its ground left alone has 91.)
+    log(`  cell reports of liquid at a brick not stored, at the banks: ${edge}`);
+    // a splash on the other side, and the ground dug away under it while it is solved
+    solved = 0;
+    await run(12, () => world.pour([D[0], LEVEL + 14, D[1]], [0, -30, 0], 5));
+    const poured = sim.added;
+    await run(20);
+    const during = sim.bricks - sim.nHeld;
+    await run(72, () => world.editTerrain([D[0], 0, D[1]], 12, -RATE));
+    const b2 = bedOff(), pit = t.height(D[0], D[1]);
+    levels = [];
+    await run(900);
+    const owed2 = owed();
+    const L2 = meanLevel(), P2 = levelOf(ground, v0 + sim.added + owed2, POOL);
+    check(during > 0 && pit < FLOOR - 8 && b2.off < 1e-5 && b2.walls === 0, `${poured.toFixed(0)} cells of water poured in are solved in 3D (${during} bricks, ${solved} at the most), and the ground is dug ${(FLOOR - pit).toFixed(1)} cells into the floor under them: the bed follows (off by ${e(b2.off)})`);
+    check(worst < 1, `no water lost or gained while it is solved and after: off by ${Math.abs(last).toFixed(2)} cells (${e(Math.abs(last) / v0)}) after ${(sim.frame * sim.params.dt).toFixed(0)} s, ${(100 * worst).toFixed(0)} % at the most of what is allowed; ${sim.bricks - sim.nHeld} bricks solved at the end (${edge} cell reports at the banks by now)`);
+    check(Math.abs((L2 - L0) - (P2 - P0)) < 0.15, `the lake stands ${(L2 - L0).toFixed(2)} cells from where it stood at first (the mean of 14 s, in which it sloshes by ${swing().toFixed(2)}): mound, pit, what was poured in and the ${owed2.toFixed(0)} cells the shores owe say ${(P2 - P0).toFixed(2)} (without those ${(levelOf(ground, v0 + sim.added, POOL) - P0).toFixed(2)})`);
+    world.dispose();
+  }
+
+  log(failed ? `${failed} check(s) failed` : 'all checks passed');
+} catch (err) {
+  console.log('ERROR ' + (err.stack || err));
+  window.__error = String(err);
+}
+window.__done = true;
+</script>

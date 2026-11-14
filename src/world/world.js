@@ -485,6 +485,37 @@ export class World {
     const m = this.sim.mouse;
     m.pos = pos; m.vel = vel; m.radius = radius; m.strength = strength; m.dir = dir;
   }
+  /**
+   * Raise the ground around `pos` by `amount` cells in the middle of a circle of `radius` cells
+   * (negative: dig), see Terrain.edit. The solver reads the ground anew every step: the water
+   * over ground that comes up is pushed aside, and runs into what is dug. Returns false where
+   * there is no ground to work on.
+   */
+  editTerrain(pos, radius, amount) {
+    const t = this.terrain;
+    if (!t) return false;
+    // (not out of the world: what is below the lowest ground of the scene, or far above its
+    // highest, has no bricks to be stored in sight of anyone)
+    const lim = this._terrainLimits || (this._terrainLimits = { lo: t.min - 24, hi: t.max + 48 });
+    const box = t.edit(pos[0], pos[2], radius, amount, lim);
+    if (!box) return false;
+    const sim = this.sim, B = sim.B, a = sim.anchor;
+    // bricks that lay in the ground may not any more (those that do now are found as they are asked for)
+    const set = sim.levels[0].set, solid = sim.solidBrick;
+    set.unmark(Math.floor((box[0] + a[0]) / B) - 1, Math.floor((box[2] + a[0]) / B) + 1, this.dim === 3 ? Math.floor((box[1] + a[2]) / B) - 1 : -1e9, this.dim === 3 ? Math.floor((box[3] + a[2]) / B) + 1 : 1e9,
+      solid ? (x, y, z) => solid(x * B, y * B, z * B, B) : null);
+    if (this.hf) this.hf.setBedIn((x, z) => t.height(x, z), box);
+    sim.groundChanged();
+    // what lies there asleep is on other ground now
+    for (const b of this.bodies) {
+      if (b.asleep && Math.hypot(b.pos[0] - pos[0], b.pos[2] - pos[2]) < radius + b.extent + 2) this.wake(b);
+    }
+    // (for the tests: how often the ground has been worked on, and where last)
+    this.terrainEdits = (this.terrainEdits || 0) + 1;
+    this.terrainSpot = [pos[0], pos[1], pos[2]];
+    return true;
+  }
+
   pour(pos, vel, radius) { this.sim.editLiquid([{ type: 'ball', center: pos, radius, vel }], 1, { meter: true }); }
   erase(pos, radius) { this.sim.editLiquid([{ type: 'ball', center: pos, radius }], 2, { meter: true }); }
 

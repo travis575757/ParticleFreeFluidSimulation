@@ -68,6 +68,53 @@ export class Terrain {
 
   height(x, z = 0) { return this.sample(x, z)[0]; }
 
+  /**
+   * Raise the ground around (x, z) by `amount` cells in the middle (negative: dig), less
+   * towards the edge of a circle of `radius` cells and not at all beyond it; never above
+   * `hi` or below `lo`. The texture follows at once. Returns the box of cells
+   * [x0, z0, x1, z1] in which the ground or its slope is another now, or null.
+   */
+  edit(x, z, radius, amount, { lo = -Infinity, hi = Infinity } = {}) {
+    const [nx, nz] = this.n, s = this.spacing, d = this.data, o = this.origin;
+    const flat = nz === 1;
+    const i0 = Math.max(Math.ceil((x - radius - o[0]) / s), 0), i1 = Math.min(Math.floor((x + radius - o[0]) / s), nx - 1);
+    const j0 = flat ? 0 : Math.max(Math.ceil((z - radius - o[1]) / s), 0), j1 = flat ? 0 : Math.min(Math.floor((z + radius - o[1]) / s), nz - 1);
+    if (i0 > i1 || j0 > j1) return null;
+    let changed = false;
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const q = ((o[0] + i * s - x) ** 2 + (flat ? 0 : (o[1] + j * s - z) ** 2)) / (radius * radius);
+        if (q >= 1) continue;
+        const k = 4 * (j * nx + i);
+        // (towards a limit: no further than to it; beyond one already: left where it is)
+        const to = d[k] + amount * (1 - q) * (1 - q);
+        const h = amount > 0 ? Math.max(d[k], Math.min(to, hi)) : Math.min(d[k], Math.max(to, lo));
+        if (h === d[k]) continue;
+        d[k] = h;
+        changed = true;
+        // (the bounds are of the samples as they are stored, like those of the constructor)
+        if (d[k] > this.max) this.max = d[k];
+        if (d[k] < this.min) this.min = d[k];
+      }
+    }
+    if (!changed) return null;
+    // the slopes of these samples and of those next to them, as the constructor has them
+    const a0 = Math.max(i0 - 1, 0), a1 = Math.min(i1 + 1, nx - 1), b0 = Math.max(j0 - 1, 0), b1 = Math.min(j1 + 1, nz - 1);
+    const at = (i, j) => d[4 * (Math.min(Math.max(j, 0), nz - 1) * nx + Math.min(Math.max(i, 0), nx - 1))];
+    const w = a1 - a0 + 1, h = b1 - b0 + 1, part = new Float32Array(4 * w * h);
+    for (let j = b0; j <= b1; j++) {
+      for (let i = a0; i <= a1; i++) {
+        const k = 4 * (j * nx + i);
+        d[k + 1] = (at(i + 1, j) - at(i - 1, j)) / ((Math.min(i + 1, nx - 1) - Math.max(i - 1, 0) || 1) * s);
+        d[k + 2] = (at(i, j + 1) - at(i, j - 1)) / ((Math.min(j + 1, nz - 1) - Math.max(j - 1, 0) || 1) * s);
+        part.set(d.subarray(k, k + 4), 4 * ((j - b0) * w + i - a0));
+      }
+    }
+    this.glc.upload(this.tex, part, a0, b0, w, h);
+    // (the ground between two samples is theirs: a cell further on either side)
+    return [o[0] + (a0 - 1) * s, o[1] + (b0 - 1) * s, o[0] + (a1 + 1) * s, o[1] + (b1 + 1) * s];
+  }
+
   /** Signed distance estimate at p (negative in the ground), as sdTerrain() in the shader. */
   sd(p) {
     const [h, gx, gz] = this.sample(p[0], p[2]);

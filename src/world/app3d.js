@@ -39,7 +39,7 @@ for (const [k, v] of q) if (k.startsWith('p.')) state.overrides[k.slice(2)] = Nu
 
 let glc, renderer, world, readouts, panel;
 const camera = new Camera();
-const pointer = { down: false, orbit: false, pan: false, ndc: [0, 0], lastNdc: null, lastT: 0, vel: [0, 0, 0], inside: false, hit: null, pos: null };
+const pointer = { down: false, orbit: false, pan: false, ndc: [0, 0], lastNdc: null, lastT: 0, vel: [0, 0, 0], inside: false, hit: null, pos: null, level: null, stroke: 0 };
 
 const v3 = {
   add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
@@ -97,6 +97,8 @@ function actionPoint() {
   const h = pointer.hit;
   const lift = state.tool === 'pour' ? state.brush * 1.5 : 0;
   if (state.tool === 'hole' && h && h.solid > 0) return v3.add(ray.origin, v3.mul(ray.dir, h.solid));
+  // (the ground itself, also where it lies under water)
+  if (shaping() && h && h.solid > 0) return v3.add(ray.origin, v3.mul(ray.dir, h.solid));
   if (h && h.liquid > 0) return v3.add(v3.add(ray.origin, v3.mul(ray.dir, h.liquid)), [0, lift, 0]);
   if (h && h.solid > 0) return v3.add(v3.add(ray.origin, v3.mul(ray.dir, h.solid)), [0, lift + state.brush * 0.5, 0]);
   const { fwd } = camera.basis();
@@ -107,6 +109,8 @@ function actionPoint() {
 canvas.addEventListener('pointerdown', (ev) => {
   canvas.setPointerCapture(ev.pointerId);
   pointer.down = true;
+  pointer.stroke++;
+  pointer.level = null;
   pointer.ndc = ndcOf(ev);
   pointer.lastNdc = pointer.ndc;
   pointer.lastT = performance.now();
@@ -120,6 +124,11 @@ canvas.addEventListener('pointerdown', (ev) => {
 });
 
 const holeRadius = () => Math.max(2.5, state.brush / 2);
+// Raise and Dig: the ground comes up, or goes down, by GROUND_RATE cells a second in the middle
+// of a circle twice the brush across (and wide enough to hold a sample of the ground).
+const GROUND_RATE = 10;
+const shaping = () => state.tool === 'raise' || state.tool === 'dig';
+const groundRadius = () => Math.max(2 * state.brush, world.terrain ? 1.5 * world.terrain.spacing : 0);
 /**
  * A hole through the hull under the pointer: a ball centred half a wall inside the surface the
  * pointer's ray meets (so that it comes out on the other side of the plating).
@@ -171,7 +180,7 @@ canvas.addEventListener('pointermove', (ev) => {
   pointer.lastT = now;
   pointer.inside = true;
 });
-const end = () => { pointer.down = false; pointer.orbit = false; pointer.pan = false; canvas.style.cursor = state.tool === 'orbit' ? 'grab' : 'crosshair'; };
+const end = () => { pointer.down = false; pointer.orbit = false; pointer.pan = false; pointer.level = null; canvas.style.cursor = state.tool === 'orbit' ? 'grab' : 'crosshair'; };
 canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 canvas.addEventListener('pointerleave', () => { pointer.inside = false; });
@@ -190,7 +199,14 @@ function applyPointer() {
   if ((!pointer.inside && !pointer.down) || state.tool === 'orbit') return;
   // keep the distances under the pointer up to date (1-pixel GPU pick)
   const ray = pointerRay();
-  renderer.pick(world, ray.origin, ray.dir).then((h) => { if (h) pointer.hit = h; }).catch(() => {});
+  const stroke = pointer.down ? pointer.stroke : -1;
+  renderer.pick(world, ray.origin, ray.dir).then((h) => {
+    if (!h) return;
+    pointer.hit = h;
+    // (a stroke of Raise or Dig begins on the ground that a ray of its own has met: what was
+    // read before the button went down may be of another place, if the pointer was moving)
+    if (stroke === pointer.stroke && pointer.down && pointer.level === null && shaping() && h.solid > 0) pointer.level = ray.origin[1] + ray.dir[1] * h.solid;
+  }).catch(() => {});
   pointer.pos = actionPoint();
   if (!pointer.down || pointer.orbit || pointer.pan) return;
   const vmax = 10 / dt;
@@ -199,6 +215,18 @@ function applyPointer() {
   if (state.tool === 'drain') world.erase(pointer.pos, r);
   else if (state.tool === 'pour') world.pour(pointer.pos, v3.add(v3.mul(v, 0.6), [0, -20, 0]), r);
   else if (state.tool === 'push') world.setBrush(pointer.pos, v, r * 1.4, 1.0);
+  else if (shaping() && pointer.hit && pointer.hit.solid > 0) {
+    // A stroke works in the level plane through the ground where it began: where the pointer's
+    // ray meets that plane. (Where it meets the ground itself moves as the ground does: towards
+    // the eye on ground that comes up, away from it in a pit, two and a half cells for every
+    // cell at the angle of these views, and the tool would crawl along the ray.)
+    // (the level is set by the first distance read after the button went down, above: a frame later)
+    if (pointer.level !== null) {
+      const t = (pointer.level - ray.origin[1]) / ray.dir[1];
+      const spot = Math.abs(ray.dir[1]) > 1e-3 && t > 0 ? v3.add(ray.origin, v3.mul(ray.dir, t)) : pointer.pos;
+      world.editTerrain(spot, groundRadius(), (state.tool === 'raise' ? 1 : -1) * GROUND_RATE * dt);
+    }
+  }
 }
 
 // ---------------------------------------------------------------- panel
@@ -224,6 +252,8 @@ function buildPanel() {
     ['drain', 'Drain', 'Hold to remove liquid'],
     ['crate', 'Crate', 'Click to drop a crate (its size follows the brush; up to twelve solids in a scene)'],
     ['hole', 'Hole', 'Click on a ship to make a hole through her hull (half the brush across, at least 2.5 cells)'],
+    ['raise', 'Raise', 'Hold to raise the ground under the pointer, also under water (twice the brush across; the open sea scenes have no ground)'],
+    ['dig', 'Dig', 'Hold to dig into the ground under the pointer'],
   ], state.tool, (v) => { state.tool = v; canvas.style.cursor = v === 'orbit' ? 'grab' : 'crosshair'; });
   P.slider('brush', 'Brush size (cells)', { min: 3, max: 16, step: 1, value: state.brush }, (v) => { state.brush = v; });
   P.note('Right-drag or Shift-drag orbits, middle-drag or Ctrl-drag moves the view, the wheel zooms.');
@@ -392,7 +422,7 @@ function tick() {
       applyPointer();
     }
     const showBrush = pointer.pos && state.tool !== 'orbit' && (pointer.inside || pointer.down);
-    renderer.render(world, camera, { overlay: state.overlay, mist: state.mist, swell: state.swell, detail: state.detail, foam: state.foam, exact: state.exact, cursor: showBrush ? [...pointer.pos, state.tool === 'hole' ? holeRadius() : state.brush] : null });
+    renderer.render(world, camera, { overlay: state.overlay, mist: state.mist, swell: state.swell, detail: state.detail, foam: state.foam, exact: state.exact, cursor: showBrush ? [...pointer.pos, state.tool === 'hole' ? holeRadius() : shaping() ? groundRadius() : state.brush] : null });
     if (frame % 6 === 0) {
       // the totals of the sources and drains follow the same report the storage counters come from
       if (glc.readback !== 'scrambled') {
